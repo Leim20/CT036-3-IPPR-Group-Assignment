@@ -1,0 +1,25 @@
+# Python virtual environment -- ~198MB, must never be committed.
+# After cloning, each team member rebuilds it by following the setup
+# steps in the README.
+.venv/
+venv/
+env/
+
+# Python bytecode cache
+__pycache__/
+*.py[cod]
+
+# Auto-generated outputs (reproducible any time, don't belong in version control)
+dataset/selftest_result.jpg
+dataset/evaluation_result.csv
+dataset/failures/
+
+# Local machine-specific config
+.claude/settings.local.json
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
