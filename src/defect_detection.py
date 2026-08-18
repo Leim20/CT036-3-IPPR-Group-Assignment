@@ -183,17 +183,23 @@ def deduplicate(defects):
     return kept
 
 
-def run_all_detectors(img, mask_filled, mask_raw, bg_color):
-    """Run every registered detector, return (defect list, error list).
+def run_all_detectors(img, mask_filled, mask_raw, bg_color, detectors=None):
+    """Run the given detectors, return (defect list, error list).
 
     Each detector is wrapped in its own try/except: if a detector crashes
     or returns malformed data, only that one is skipped, the rest keep
     running as normal -- one broken detector out of 12 shouldn't mean the
     whole system does nothing when the button is clicked (the worst
     outcome during a demo, worth 10% of the marks).
+
+    detectors: defaults to everything in DETECTORS; the GUI passes a
+    filtered subset when the user has unticked one in the "Detectors"
+    checklist (handy for skipping a detector that's still being fixed).
     """
+    if detectors is None:
+        detectors = DETECTORS
     defects, errors = [], []
-    for det in DETECTORS:
+    for det in detectors:
         try:
             found = det(img, mask_filled, mask_raw, bg_color)
             for name, box in found:

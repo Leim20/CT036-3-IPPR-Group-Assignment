@@ -3,9 +3,11 @@
 GUI entry point -- run this file directly to start the system:
     .venv\\Scripts\\python src\\gui.py
 
-Layout: original image on the left, annotated result on the right (red
-boxes mark defects), and a text list underneath listing the detected
-defect types (the assignment requires the GUI to display defect types).
+Layout: below the button bar is a "Detectors" panel (untick a box to skip
+that detector, e.g. one that's still being fixed), then the original
+image on the left and the annotated result on the right (red boxes mark
+defects), and a text list at the bottom listing the detected defect types
+(the assignment requires the GUI to display defect types).
 """
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -16,9 +18,22 @@ from PIL import Image, ImageTk
 
 from preprocessing import preprocess
 from segmentation import segment_glove, glove_found, get_background_color
-from defect_detection import run_all_detectors, draw_results
+from defect_detection import DETECTORS, run_all_detectors, draw_results
 
-PANEL_W = 460  # width of each image panel, in pixels
+PANEL_W = 460         # width of each image panel, in pixels
+DETECTOR_COLUMNS = 4  # how many checkboxes per row; wraps automatically as
+                      # more detectors get added (up to 10 planned)
+
+
+def _label_for(detector):
+    """Turn a detector function's name into a readable checkbox label.
+    e.g. detect_open_tears -> "Open Tears".
+    New detectors get a label automatically, nothing to maintain here.
+    """
+    name = detector.__name__
+    if name.startswith("detect_"):
+        name = name[len("detect_"):]
+    return name.replace("_", " ").title()
 
 
 class GloveDefectApp:
@@ -36,6 +51,31 @@ class GloveDefectApp:
         tk.Button(bar, text="Detect Defects", width=14,
                   command=self.detect).pack(side=tk.LEFT, padx=6)
 
+        # ---- detector checkboxes: all ticked by default, so behaviour
+        #      matches "no checkboxes at all"; untick to skip a detector
+        #      (e.g. one that's still being fixed) ----
+        picker = tk.LabelFrame(root, text="Detectors", padx=8, pady=6)
+        picker.pack(padx=8, pady=(0, 8), fill=tk.X)
+
+        self.detector_vars = {det: tk.BooleanVar(value=True) for det in DETECTORS}
+        for i, det in enumerate(DETECTORS):
+            tk.Checkbutton(picker, text=_label_for(det),
+                          variable=self.detector_vars[det]
+                          ).grid(row=i // DETECTOR_COLUMNS,
+                                 column=i % DETECTOR_COLUMNS,
+                                 sticky="w", padx=6)
+
+        # All/None: handy once there are several detectors and you want
+        # to isolate-test just your own
+        btn_row = (len(DETECTORS) - 1) // DETECTOR_COLUMNS + 1
+        btns = tk.Frame(picker)
+        btns.grid(row=btn_row, column=0, columnspan=DETECTOR_COLUMNS,
+                  sticky="w", pady=(6, 0))
+        tk.Button(btns, text="All", width=6,
+                  command=self.select_all_detectors).pack(side=tk.LEFT, padx=(0, 4))
+        tk.Button(btns, text="None", width=6,
+                  command=self.select_no_detectors).pack(side=tk.LEFT)
+
         # ---- two image panels in the middle ----
         panels = tk.Frame(root)
         panels.pack(padx=8)
@@ -50,6 +90,15 @@ class GloveDefectApp:
         self.result_box = tk.Text(root, height=6, font=("Segoe UI", 11))
         self.result_box.pack(fill=tk.X, padx=8, pady=8)
         self.say("Open a glove image, then click 'Detect Defects'.")
+
+    # ---------- detector checkboxes: select all / none ----------
+    def select_all_detectors(self):
+        for var in self.detector_vars.values():
+            var.set(True)
+
+    def select_no_detectors(self):
+        for var in self.detector_vars.values():
+            var.set(False)
 
     # ---------- helper: write text into the result box ----------
     def say(self, text):
@@ -110,9 +159,19 @@ class GloveDefectApp:
                      "background.")
             return
 
+        # Only run the ticked detectors; if none are ticked, say so
+        # explicitly instead of silently running everything or silently
+        # reporting PASSED -- either would make the checkboxes pointless
+        enabled = [det for det in DETECTORS if self.detector_vars[det].get()]
+        if not enabled:
+            self.show_on_panel(self.panel_right, self.img_plain)
+            self.say("No detectors selected. Tick at least one box above "
+                     "and click 'Detect Defects' again.")
+            return
+
         bg_color = get_background_color(self.img_norm)
         defects, errors = run_all_detectors(               # 2. find defects
-            self.img_norm, mask_filled, mask_raw, bg_color)
+            self.img_norm, mask_filled, mask_raw, bg_color, detectors=enabled)
         result_img = draw_results(self.img_plain, defects)   # 3. draw the results
         self.show_on_panel(self.panel_right, result_img)
 
