@@ -32,10 +32,38 @@ IMAGE_PLACEHOLDER = "Select a test image..."
 DETECTOR_PLACEHOLDER = "Select a defect..."
 ALL_DETECTORS_LABEL = "All Defects"
 
+QUESTION_PAPER_DEFECTS = (
+    "Discoloration",
+    "Wrinkles/Dent",
+    "Oversize",
+    "Plastic Contamination",
+    "Thin",
+    "Damaged by Fold",
+    "Spotting",
+    "Inside Out",
+    "Improper Roll",
+)
+
+ADDITIONAL_GROUP_DEFECTS = (
+    "Hole / Puncture",
+    "Open Tear",
+    "Stain",
+    "Missing Finger",
+    "Fused Fingers",
+)
+
+DEFECT_OPTIONS = QUESTION_PAPER_DEFECTS + ADDITIONAL_GROUP_DEFECTS
+
 DETECTOR_LABELS = {
     "detect_holes": "Hole / Puncture",
     "detect_open_tears": "Open Tear",
     "detect_stains": "Stain",
+    "detect_missing_finger": "Missing Finger",
+    "detect_fused_fingers": "Fused Fingers",
+    "detect_discoloration": "Discoloration",
+    "detect_oversize": "Oversize",
+    "detect_thin_area": "Thin",
+    "detect_wrinkles": "Wrinkles/Dent",
 }
 
 
@@ -86,6 +114,10 @@ class GloveDefectApp:
         self.image_var = tk.StringVar(value=IMAGE_PLACEHOLDER)
         self.detector_var = tk.StringVar(value=DETECTOR_PLACEHOLDER)
         self.image_count_var = tk.StringVar()
+        available = len(set(DEFECT_OPTIONS) & set(self.detector_by_label))
+        self.detector_count_var = tk.StringVar(
+            value=f"{available} of {len(DEFECT_OPTIONS)} detectors available"
+        )
 
         self._build_interface()
         self.refresh_image_list()
@@ -125,7 +157,7 @@ class GloveDefectApp:
         self.image_combo.grid(row=1, column=0, sticky="ew", padx=(0, 10), pady=(3, 0))
         self.image_combo.bind("<<ComboboxSelected>>", self.on_image_selected)
 
-        detector_values = [ALL_DETECTORS_LABEL, *self.detector_by_label]
+        detector_values = [ALL_DETECTORS_LABEL, *DEFECT_OPTIONS]
         self.detector_combo = ttk.Combobox(
             controls,
             textvariable=self.detector_var,
@@ -151,6 +183,11 @@ class GloveDefectApp:
             textvariable=self.image_count_var,
             foreground="#4b5563",
         ).grid(row=2, column=0, sticky="w", pady=(5, 0))
+        ttk.Label(
+            controls,
+            textvariable=self.detector_count_var,
+            foreground="#4b5563",
+        ).grid(row=2, column=1, sticky="w", pady=(5, 0))
 
         panels = ttk.Frame(container)
         panels.pack(fill=tk.BOTH, expand=True)
@@ -273,7 +310,15 @@ class GloveDefectApp:
         image_name = self.image_var.get()
         detector_name = self.detector_var.get()
 
-        lines = ["Status: READY"]
+        detector_unavailable = (
+            detector_name in DEFECT_OPTIONS
+            and detector_name not in self.detector_by_label
+        )
+        lines = [
+            "Status: DETECTOR NOT AVAILABLE"
+            if detector_unavailable
+            else "Status: READY"
+        ]
         lines.append(
             f"Selected image: {image_name}"
             if image_name in self.image_paths
@@ -281,11 +326,17 @@ class GloveDefectApp:
         )
         lines.append(
             f"Detection mode: {detector_name}"
-            if self._selected_detectors()
+            if detector_name == ALL_DETECTORS_LABEL or detector_name in DEFECT_OPTIONS
             else "Detection mode: Not selected"
         )
         lines.append("")
-        lines.append("Choose an image and detection mode, then click Run Detection.")
+        if detector_unavailable:
+            lines.append(
+                f"{detector_name} is listed for this project, but its detector "
+                "has not been implemented yet."
+            )
+        else:
+            lines.append("Choose an image and detection mode, then click Run Detection.")
         self.say("\n".join(lines))
 
     def _clear_panel(self, panel, text):
@@ -316,7 +367,14 @@ class GloveDefectApp:
 
         detectors = self._selected_detectors()
         if not detectors:
-            messagebox.showwarning("Detector Required", "Please select a defect.")
+            selected = self.detector_var.get()
+            if selected in DEFECT_OPTIONS:
+                messagebox.showwarning(
+                    "Detector Not Available",
+                    f"The {selected} detector has not been implemented yet.",
+                )
+            else:
+                messagebox.showwarning("Detector Required", "Please select a defect.")
             return
 
         self.run_button.configure(text="Detecting...", state=tk.DISABLED)
