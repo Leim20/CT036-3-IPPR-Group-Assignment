@@ -28,8 +28,12 @@ python -m venv .venv                      # create an isolated Python environmen
 .venv\Scripts\python src\gui.py
 ```
 
-Once the window opens: click **Open Image** -> pick a glove photo -> click
-**Detect Defects**.
+First place the test photos under `dataset/raw/<material>/<defect>/`. Once the
+window opens, choose a photo from **Test Image**, select one defect or
+`All Defects` under **Defect / Detection Mode**, then click **Run Detection**.
+The original image appears as soon as it is selected; the result panel shows
+red bounding boxes and defect labels, while the summary lists the status,
+detection mode and candidate-region coordinates.
 
 ## Project structure (what each file does)
 

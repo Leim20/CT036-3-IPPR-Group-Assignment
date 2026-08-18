@@ -1,16 +1,16 @@
 # -*- coding: utf-8 -*-
-"""
-GUI entry point -- run this file directly to start the system:
-    .venv\\Scripts\\python src\\gui.py
+"""Glove Defect Detection System GUI.
 
-Layout: below the button bar is a "Detectors" panel (untick a box to skip
-that detector, e.g. one that's still being fixed), then the original
-image on the left and the annotated result on the right (red boxes mark
-defects), and a text list at the bottom listing the detected defect types
-(the assignment requires the GUI to display defect types).
+Run from the project root with:
+    .venv/Scripts/python src/gui.py
+
+The image picker scans ``dataset/raw`` recursively. Selecting an image previews
+it immediately. The user can then run one detector for a focused test, or run
+all registered detectors for a complete inspection.
 """
+from pathlib import Path
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import messagebox, ttk
 
 import cv2
 import numpy as np
@@ -20,177 +20,384 @@ from preprocessing import preprocess
 from segmentation import segment_glove, glove_found, get_background_color
 from defect_detection import DETECTORS, run_all_detectors, draw_results
 
-PANEL_W = 460         # width of each image panel, in pixels
-DETECTOR_COLUMNS = 4  # how many checkboxes per row; wraps automatically as
-                      # more detectors get added (up to 10 planned)
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DATASET_DIR = PROJECT_ROOT / "dataset" / "raw"
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".gif"}
+
+PANEL_W = 460
+PANEL_H = 340
+
+IMAGE_PLACEHOLDER = "Select a test image..."
+DETECTOR_PLACEHOLDER = "Select a defect..."
+ALL_DETECTORS_LABEL = "All Defects"
+
+DETECTOR_LABELS = {
+    "detect_holes": "Hole / Puncture",
+    "detect_open_tears": "Open Tear",
+    "detect_stains": "Stain",
+}
 
 
 def _label_for(detector):
-    """Turn a detector function's name into a readable checkbox label.
-    e.g. detect_open_tears -> "Open Tears".
-    New detectors get a label automatically, nothing to maintain here.
-    """
+    """Return a concise user-facing label for a detector function."""
     name = detector.__name__
+    if name in DETECTOR_LABELS:
+        return DETECTOR_LABELS[name]
     if name.startswith("detect_"):
         name = name[len("detect_"):]
     return name.replace("_", " ").title()
+
+
+def find_dataset_images(dataset_dir=DATASET_DIR):
+    """Return every supported image below the dataset directory."""
+    if not dataset_dir.exists():
+        return []
+    return sorted(
+        (
+            path
+            for path in dataset_dir.rglob("*")
+            if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
+        ),
+        key=lambda path: path.as_posix().lower(),
+    )
+
+
+def display_path(path, dataset_dir=DATASET_DIR):
+    """Show a short ``material / defect / filename`` path in the dropdown."""
+    try:
+        return path.relative_to(dataset_dir).as_posix()
+    except ValueError:
+        return path.name
 
 
 class GloveDefectApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Glove Defect Detection System (GDD)")
-        self.img_norm = None   # illumination-normalised image (segmentation/colour detectors)
-        self.img_plain = None  # un-normalised image (texture detectors)
+        self.root.minsize(980, 720)
 
-        # ---- top button bar ----
-        bar = tk.Frame(root)
-        bar.pack(pady=8)
-        tk.Button(bar, text="Open Image", width=14,
-                  command=self.open_image).pack(side=tk.LEFT, padx=6)
-        tk.Button(bar, text="Detect Defects", width=14,
-                  command=self.detect).pack(side=tk.LEFT, padx=6)
+        self.img_norm = None
+        self.img_plain = None
+        self.selected_image_path = None
+        self.image_paths = {}
+        self.detector_by_label = {_label_for(det): det for det in DETECTORS}
 
-        # ---- detector checkboxes: all ticked by default, so behaviour
-        #      matches "no checkboxes at all"; untick to skip a detector
-        #      (e.g. one that's still being fixed) ----
-        picker = tk.LabelFrame(root, text="Detectors", padx=8, pady=6)
-        picker.pack(padx=8, pady=(0, 8), fill=tk.X)
+        self.image_var = tk.StringVar(value=IMAGE_PLACEHOLDER)
+        self.detector_var = tk.StringVar(value=DETECTOR_PLACEHOLDER)
+        self.image_count_var = tk.StringVar()
 
-        self.detector_vars = {det: tk.BooleanVar(value=True) for det in DETECTORS}
-        for i, det in enumerate(DETECTORS):
-            tk.Checkbutton(picker, text=_label_for(det),
-                          variable=self.detector_vars[det]
-                          ).grid(row=i // DETECTOR_COLUMNS,
-                                 column=i % DETECTOR_COLUMNS,
-                                 sticky="w", padx=6)
+        self._build_interface()
+        self.refresh_image_list()
+        self._show_ready_message()
 
-        # All/None: handy once there are several detectors and you want
-        # to isolate-test just your own
-        btn_row = (len(DETECTORS) - 1) // DETECTOR_COLUMNS + 1
-        btns = tk.Frame(picker)
-        btns.grid(row=btn_row, column=0, columnspan=DETECTOR_COLUMNS,
-                  sticky="w", pady=(6, 0))
-        tk.Button(btns, text="All", width=6,
-                  command=self.select_all_detectors).pack(side=tk.LEFT, padx=(0, 4))
-        tk.Button(btns, text="None", width=6,
-                  command=self.select_no_detectors).pack(side=tk.LEFT)
+    def _build_interface(self):
+        """Build the three-part interface: controls, images and result summary."""
+        container = ttk.Frame(self.root, padding=12)
+        container.pack(fill=tk.BOTH, expand=True)
 
-        # ---- two image panels in the middle ----
-        panels = tk.Frame(root)
-        panels.pack(padx=8)
-        self.panel_left = tk.Label(panels, text="Original", width=60,
-                                   height=20, relief=tk.SUNKEN)
-        self.panel_left.pack(side=tk.LEFT, padx=4, pady=4)
-        self.panel_right = tk.Label(panels, text="Result", width=60,
-                                    height=20, relief=tk.SUNKEN)
-        self.panel_right.pack(side=tk.LEFT, padx=4, pady=4)
+        ttk.Label(
+            container,
+            text="Glove Defect Detection System",
+            font=("Segoe UI", 18, "bold"),
+        ).pack(anchor="w", pady=(0, 10))
 
-        # ---- results text box at the bottom ----
-        self.result_box = tk.Text(root, height=6, font=("Segoe UI", 11))
-        self.result_box.pack(fill=tk.X, padx=8, pady=8)
-        self.say("Open a glove image, then click 'Detect Defects'.")
+        controls = ttk.LabelFrame(container, text="Detection Setup", padding=10)
+        controls.pack(fill=tk.X, pady=(0, 10))
+        controls.columnconfigure(0, weight=3)
+        controls.columnconfigure(1, weight=2)
 
-    # ---------- detector checkboxes: select all / none ----------
-    def select_all_detectors(self):
-        for var in self.detector_vars.values():
-            var.set(True)
+        ttk.Label(controls, text="Test Image").grid(
+            row=0, column=0, sticky="w", padx=(0, 10)
+        )
+        ttk.Label(controls, text="Defect / Detection Mode").grid(
+            row=0, column=1, sticky="w", padx=(0, 10)
+        )
+        ttk.Label(controls, text="Action").grid(row=0, column=2, sticky="w")
 
-    def select_no_detectors(self):
-        for var in self.detector_vars.values():
-            var.set(False)
+        self.image_combo = ttk.Combobox(
+            controls,
+            textvariable=self.image_var,
+            state="readonly",
+            width=48,
+            postcommand=self.refresh_image_list,
+        )
+        self.image_combo.grid(row=1, column=0, sticky="ew", padx=(0, 10), pady=(3, 0))
+        self.image_combo.bind("<<ComboboxSelected>>", self.on_image_selected)
 
-    # ---------- helper: write text into the result box ----------
-    def say(self, text):
-        self.result_box.delete("1.0", tk.END)
-        self.result_box.insert(tk.END, text + "\n")
+        detector_values = [ALL_DETECTORS_LABEL, *self.detector_by_label]
+        self.detector_combo = ttk.Combobox(
+            controls,
+            textvariable=self.detector_var,
+            values=detector_values,
+            state="readonly",
+            width=29,
+        )
+        self.detector_combo.grid(
+            row=1, column=1, sticky="ew", padx=(0, 10), pady=(3, 0)
+        )
+        self.detector_combo.bind("<<ComboboxSelected>>", self.on_detector_selected)
 
-    # ---------- helper: display an OpenCV image on a Tkinter panel ----------
-    def show_on_panel(self, panel, img_bgr):
-        h, w = img_bgr.shape[:2]
-        scale = PANEL_W / w
-        img_small = cv2.resize(img_bgr, (PANEL_W, int(h * scale)))
-        img_rgb = cv2.cvtColor(img_small, cv2.COLOR_BGR2RGB)
-        photo = ImageTk.PhotoImage(Image.fromarray(img_rgb))
-        panel.config(image=photo, width=PANEL_W, height=int(h * scale))
-        panel.image = photo  # keep a reference so the image isn't garbage-collected
+        self.run_button = ttk.Button(
+            controls,
+            text="Run Detection",
+            command=self.detect,
+            state=tk.DISABLED,
+        )
+        self.run_button.grid(row=1, column=2, sticky="ew", pady=(3, 0))
 
-    # ---------- button: open an image ----------
-    def open_image(self):
-        path = filedialog.askopenfilename(
-            title="Select a glove image",
-            filetypes=[("Image files", "*.jpg *.jpeg *.png *.bmp *.gif")])
-        if not path:
+        ttk.Label(
+            controls,
+            textvariable=self.image_count_var,
+            foreground="#4b5563",
+        ).grid(row=2, column=0, sticky="w", pady=(5, 0))
+
+        panels = ttk.Frame(container)
+        panels.pack(fill=tk.BOTH, expand=True)
+        panels.columnconfigure(0, weight=1, uniform="image-panels")
+        panels.columnconfigure(1, weight=1, uniform="image-panels")
+        panels.rowconfigure(0, weight=1)
+
+        original_frame = ttk.LabelFrame(panels, text="Original Image", padding=8)
+        original_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
+        result_frame = ttk.LabelFrame(panels, text="Detection Result", padding=8)
+        result_frame.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
+
+        self.panel_left = tk.Label(
+            original_frame,
+            text="Select a dataset image above",
+            width=60,
+            height=20,
+            bg="#f3f4f6",
+            fg="#374151",
+            relief=tk.SUNKEN,
+        )
+        self.panel_left.pack(fill=tk.BOTH, expand=True)
+
+        self.panel_right = tk.Label(
+            result_frame,
+            text="Run detection to view the result",
+            width=60,
+            height=20,
+            bg="#f3f4f6",
+            fg="#374151",
+            relief=tk.SUNKEN,
+        )
+        self.panel_right.pack(fill=tk.BOTH, expand=True)
+
+        summary = ttk.LabelFrame(container, text="Detection Summary", padding=8)
+        summary.pack(fill=tk.X, pady=(10, 0))
+
+        self.result_box = tk.Text(
+            summary,
+            height=9,
+            font=("Segoe UI", 10),
+            wrap=tk.NONE,
+            state=tk.DISABLED,
+        )
+        result_scroll = ttk.Scrollbar(
+            summary, orient=tk.VERTICAL, command=self.result_box.yview
+        )
+        self.result_box.configure(yscrollcommand=result_scroll.set)
+        self.result_box.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        result_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+    def refresh_image_list(self):
+        """Rescan the dataset whenever the image dropdown is opened."""
+        paths = find_dataset_images()
+        self.image_paths = {display_path(path): path for path in paths}
+        self.image_combo.configure(values=list(self.image_paths))
+
+        count = len(paths)
+        if count:
+            self.image_count_var.set(
+                f"{count} dataset image{'s' if count != 1 else ''} available"
+            )
+        else:
+            self.image_count_var.set(
+                "No images found. Add test images under dataset/raw/."
+            )
+
+        current = self.image_var.get()
+        if current not in self.image_paths and current != IMAGE_PLACEHOLDER:
+            self.image_var.set(IMAGE_PLACEHOLDER)
+            self.selected_image_path = None
+            self.img_norm = None
+            self.img_plain = None
+            self._clear_panel(self.panel_left, "Select a dataset image above")
+            self._clear_panel(self.panel_right, "Run detection to view the result")
+            self._show_ready_message()
+        self._update_run_button()
+
+    def on_image_selected(self, _event=None):
+        selected = self.image_var.get()
+        path = self.image_paths.get(selected)
+        if path is None:
+            self._update_run_button()
             return
-        # imdecode is used here so that non-ASCII file paths are supported
+
         img = cv2.imdecode(np.fromfile(path, dtype="uint8"), cv2.IMREAD_COLOR)
         if img is None:
-            messagebox.showerror("Error", "Cannot read this image file.")
+            self.selected_image_path = None
+            self.img_norm = None
+            self.img_plain = None
+            self._update_run_button()
+            messagebox.showerror("Image Error", f"Cannot read this image:\n{path}")
             return
+
+        self.selected_image_path = path
         self.img_norm, self.img_plain = preprocess(img)
         self.show_on_panel(self.panel_left, self.img_plain)
-        self.say("Image loaded. Click 'Detect Defects' to analyse.")
+        self._clear_panel(self.panel_right, "Run detection to view the result")
+        self._show_ready_message()
+        self._update_run_button()
 
-    # ---------- button: detect defects ----------
+    def on_detector_selected(self, _event=None):
+        if self.img_plain is not None:
+            self._clear_panel(self.panel_right, "Run detection to view the result")
+        self._show_ready_message()
+        self._update_run_button()
+
+    def _selected_detectors(self):
+        selected = self.detector_var.get()
+        if selected == ALL_DETECTORS_LABEL:
+            return list(DETECTORS)
+        detector = self.detector_by_label.get(selected)
+        return [detector] if detector is not None else []
+
+    def _update_run_button(self):
+        ready = self.img_norm is not None and bool(self._selected_detectors())
+        self.run_button.configure(state=tk.NORMAL if ready else tk.DISABLED)
+
+    def _show_ready_message(self):
+        image_name = self.image_var.get()
+        detector_name = self.detector_var.get()
+
+        lines = ["Status: READY"]
+        lines.append(
+            f"Selected image: {image_name}"
+            if image_name in self.image_paths
+            else "Selected image: Not selected"
+        )
+        lines.append(
+            f"Detection mode: {detector_name}"
+            if self._selected_detectors()
+            else "Detection mode: Not selected"
+        )
+        lines.append("")
+        lines.append("Choose an image and detection mode, then click Run Detection.")
+        self.say("\n".join(lines))
+
+    def _clear_panel(self, panel, text):
+        panel.configure(image="", text=text, width=60, height=20)
+        panel.image = None
+
+    def show_on_panel(self, panel, img_bgr):
+        h, w = img_bgr.shape[:2]
+        scale = min(PANEL_W / w, PANEL_H / h)
+        display_w = max(1, int(w * scale))
+        display_h = max(1, int(h * scale))
+        img_small = cv2.resize(img_bgr, (display_w, display_h))
+        img_rgb = cv2.cvtColor(img_small, cv2.COLOR_BGR2RGB)
+        photo = ImageTk.PhotoImage(Image.fromarray(img_rgb))
+        panel.configure(image=photo, text="", width=display_w, height=display_h)
+        panel.image = photo
+
+    def say(self, text):
+        self.result_box.configure(state=tk.NORMAL)
+        self.result_box.delete("1.0", tk.END)
+        self.result_box.insert(tk.END, text + "\n")
+        self.result_box.configure(state=tk.DISABLED)
+
     def detect(self):
-        if self.img_norm is None:
-            messagebox.showwarning("Notice", "Please open an image first.")
+        if self.img_norm is None or self.selected_image_path is None:
+            messagebox.showwarning("Image Required", "Please select a test image.")
             return
-        # Safety net: any unexpected exception becomes an on-screen message
-        # instead of the button silently doing nothing
-        try:
-            self._detect()
-        except Exception as exc:
-            self.say(f"Unexpected error while processing this image:\n"
-                     f"  {type(exc).__name__}: {exc}")
 
-    def _detect(self):
-        mask_filled, mask_raw = segment_glove(self.img_norm)   # 1. segment the glove
+        detectors = self._selected_detectors()
+        if not detectors:
+            messagebox.showwarning("Detector Required", "Please select a defect.")
+            return
+
+        self.run_button.configure(text="Detecting...", state=tk.DISABLED)
+        self.root.update_idletasks()
+        try:
+            self._detect(detectors)
+        except Exception as exc:
+            self._clear_panel(self.panel_right, "Detection could not be completed")
+            self.say(
+                "Status: ERROR\n"
+                f"Selected image: {self.image_var.get()}\n"
+                f"Detection mode: {self.detector_var.get()}\n\n"
+                f"{type(exc).__name__}: {exc}"
+            )
+        finally:
+            self.run_button.configure(text="Run Detection")
+            self._update_run_button()
+
+    def _detect(self, detectors):
+        mask_filled, mask_raw = segment_glove(self.img_norm)
         ok, ratio = glove_found(mask_filled)
 
-        # Segmentation sanity check: if no glove was found, this must be
-        # stated explicitly -- "no defects found" must never be reported as
-        # "passed" (otherwise any random background photo would show PASSED)
         if not ok:
             self.show_on_panel(self.panel_right, self.img_plain)
-            self.say("No glove detected in this image "
-                     f"(glove area = {ratio:.1%} of the frame).\n"
-                     "Please use a photo with the glove centred on a plain "
-                     "background.")
-            return
-
-        # Only run the ticked detectors; if none are ticked, say so
-        # explicitly instead of silently running everything or silently
-        # reporting PASSED -- either would make the checkboxes pointless
-        enabled = [det for det in DETECTORS if self.detector_vars[det].get()]
-        if not enabled:
-            self.show_on_panel(self.panel_right, self.img_plain)
-            self.say("No detectors selected. Tick at least one box above "
-                     "and click 'Detect Defects' again.")
+            self.say(
+                "Status: NO GLOVE DETECTED\n"
+                f"Selected image: {self.image_var.get()}\n"
+                f"Detection mode: {self.detector_var.get()}\n"
+                f"Glove area: {ratio:.1%} of the frame\n\n"
+                "Use an image with the glove centred on a plain, contrasting background."
+            )
             return
 
         bg_color = get_background_color(self.img_norm)
-        defects, errors = run_all_detectors(               # 2. find defects
-            self.img_norm, mask_filled, mask_raw, bg_color, detectors=enabled)
-        result_img = draw_results(self.img_plain, defects)   # 3. draw the results
+        defects, errors = run_all_detectors(
+            self.img_norm,
+            mask_filled,
+            mask_raw,
+            bg_color,
+            detectors=detectors,
+        )
+        result_img = draw_results(self.img_plain, defects)
         self.show_on_panel(self.panel_right, result_img)
 
-        # 4. list the defect types as text (hard requirement of the assignment)
+        mode = self.detector_var.get()
         if defects:
-            lines = [f"Detected {len(defects)} defect(s):"]
-            for i, (name, (x, y, w, h)) in enumerate(defects, 1):
-                lines.append(f"  {i}. {name}   at x={x}, y={y}, size {w}x{h}")
+            lines = ["Status: DEFECT DETECTED"]
+        elif mode == ALL_DETECTORS_LABEL:
+            lines = ["Status: PASSED - NO DEFECTS DETECTED"]
         else:
-            lines = ["No defects detected - glove PASSED inspection."]
+            lines = [f"Status: NO {mode.upper()} DETECTED"]
 
-        # 5. detector errors must be surfaced explicitly: otherwise "nothing
-        #    found" and "a detector crashed" look identical on screen, and a
-        #    fault gets mistaken for a clean glove
+        lines.extend(
+            [
+                f"Selected image: {self.image_var.get()}",
+                f"Detection mode: {mode}",
+                f"Detected regions: {len(defects)}",
+                "",
+            ]
+        )
+
+        if defects:
+            for index, (name, (x, y, w, h)) in enumerate(defects, 1):
+                lines.append(
+                    f"{index}. {name} - x={x}, y={y}, width={w}, height={h}"
+                )
+        elif mode != ALL_DETECTORS_LABEL:
+            lines.append(
+                f"Only the {mode} detector was run; this is not a full glove inspection."
+            )
+        else:
+            lines.append("All registered detectors completed without finding a defect.")
+
         if errors:
-            lines.append("")
-            lines.append(f"WARNING - {len(errors)} detector(s) failed "
-                         f"(result may be incomplete):")
-            lines.extend(f"  ! {e}" for e in errors)
+            lines.extend(
+                [
+                    "",
+                    f"WARNING: {len(errors)} detector(s) failed; the result may be incomplete.",
+                    *(f"- {error}" for error in errors),
+                ]
+            )
 
         self.say("\n".join(lines))
 
