@@ -74,9 +74,10 @@ satisfying the assignment's hard requirement.
   separately under your criteria.
 - **Family 6, Wrinkles/Dent**: CLAHE in the preprocessing stage amplifies
   local contrast, which can turn normal fabric texture into a false
-  "wrinkle". `ctx["img_plain"]` (the version without illumination
-  normalisation) exists exactly for this reason -- texture-based
-  detectors should use it, not `ctx["img"]`.
+  "wrinkle". The `img` parameter a detector receives has already been
+  through CLAHE -- texture-based detectors shouldn't use it directly;
+  call `preprocessing.preprocess(original_img, fix_light=False)` yourself
+  and use its second return value instead.
 - **Family 5, Oversize / Thin area**: both need a baseline for "what a
   normal glove looks like", which can only be calibrated once real photos
   exist in `dataset/raw/<material>/good/` -- synthetic images can't

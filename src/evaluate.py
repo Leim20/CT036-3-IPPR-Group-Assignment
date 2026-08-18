@@ -39,8 +39,8 @@ import numpy as np
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-from preprocessing import prepare
-from segmentation import build_context
+from preprocessing import preprocess
+from segmentation import segment_glove, glove_found, get_background_color
 from defect_detection import run_all_detectors, draw_results
 
 # folder name (lowercase) -> the defect label a detector actually returns
@@ -130,19 +130,24 @@ def evaluate(root, save_failures=False):
             failures.append((path, "failed to read image"))
             continue
 
-        ctx = build_context(*prepare(img))
-        if not ctx["ok"]:
+        img_norm, img_plain = preprocess(img)
+        mask_filled, mask_raw = segment_glove(img_norm)
+        ok, ratio = glove_found(mask_filled)
+
+        if not ok:
             n_noglove += 1
             detected = set()
+            defects = []
             verdict = "segmentation failed (no glove detected)"
             failures.append((path, verdict))
         else:
-            defects = run_all_detectors(ctx)
+            bg_color = get_background_color(img_norm)
+            defects, errs = run_all_detectors(img_norm, mask_filled, mask_raw, bg_color)
             detected = {n for n, _ in defects}
             verdict = "correct" if detected == expected else "mismatch"
             # a detector crashing is a code bug, not an accuracy issue --
             # it must be flagged separately
-            for err in ctx["errors"]:
+            for err in errs:
                 detector_errors[err.split(":")[0]] += 1
 
         # --- per-class tally ---
@@ -169,9 +174,9 @@ def evaluate(root, save_failures=False):
         if verdict != "correct":
             if verdict == "mismatch":
                 failures.append((path, f"expected {sorted(expected)} got {sorted(detected)}"))
-            if save_failures and ctx["ok"]:
+            if save_failures and ok:
                 out = os.path.join(fail_dir, material + "_" + os.path.basename(path))
-                cv2.imwrite(out, draw_results(ctx["img_plain"], defects))
+                cv2.imwrite(out, draw_results(img_plain, defects))
 
         rows.append([path, material, "|".join(sorted(expected)),
                      "|".join(sorted(detected)), verdict])

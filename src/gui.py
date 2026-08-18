@@ -14,8 +14,8 @@ import cv2
 import numpy as np
 from PIL import Image, ImageTk
 
-from preprocessing import prepare
-from segmentation import build_context
+from preprocessing import preprocess
+from segmentation import segment_glove, glove_found, get_background_color
 from defect_detection import run_all_detectors, draw_results
 
 PANEL_W = 460  # width of each image panel, in pixels
@@ -78,7 +78,7 @@ class GloveDefectApp:
         if img is None:
             messagebox.showerror("Error", "Cannot read this image file.")
             return
-        self.img_norm, self.img_plain = prepare(img)
+        self.img_norm, self.img_plain = preprocess(img)
         self.show_on_panel(self.panel_left, self.img_plain)
         self.say("Image loaded. Click 'Detect Defects' to analyse.")
 
@@ -96,20 +96,23 @@ class GloveDefectApp:
                      f"  {type(exc).__name__}: {exc}")
 
     def _detect(self):
-        ctx = build_context(self.img_norm, self.img_plain)   # 1. segment the glove
+        mask_filled, mask_raw = segment_glove(self.img_norm)   # 1. segment the glove
+        ok, ratio = glove_found(mask_filled)
 
         # Segmentation sanity check: if no glove was found, this must be
         # stated explicitly -- "no defects found" must never be reported as
         # "passed" (otherwise any random background photo would show PASSED)
-        if not ctx["ok"]:
+        if not ok:
             self.show_on_panel(self.panel_right, self.img_plain)
             self.say("No glove detected in this image "
-                     f"(glove area = {ctx['area_ratio']:.1%} of the frame).\n"
+                     f"(glove area = {ratio:.1%} of the frame).\n"
                      "Please use a photo with the glove centred on a plain "
                      "background.")
             return
 
-        defects = run_all_detectors(ctx)                     # 2. find defects
+        bg_color = get_background_color(self.img_norm)
+        defects, errors = run_all_detectors(               # 2. find defects
+            self.img_norm, mask_filled, mask_raw, bg_color)
         result_img = draw_results(self.img_plain, defects)   # 3. draw the results
         self.show_on_panel(self.panel_right, result_img)
 
@@ -124,11 +127,11 @@ class GloveDefectApp:
         # 5. detector errors must be surfaced explicitly: otherwise "nothing
         #    found" and "a detector crashed" look identical on screen, and a
         #    fault gets mistaken for a clean glove
-        if ctx["errors"]:
+        if errors:
             lines.append("")
-            lines.append(f"WARNING - {len(ctx['errors'])} detector(s) failed "
+            lines.append(f"WARNING - {len(errors)} detector(s) failed "
                          f"(result may be incomplete):")
-            lines.extend(f"  ! {e}" for e in ctx["errors"])
+            lines.extend(f"  ! {e}" for e in errors)
 
         self.say("\n".join(lines))
 

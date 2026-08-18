@@ -30,8 +30,8 @@ import numpy as np
 # Force UTF-8 stdout in case the terminal encoding doesn't support it
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-from preprocessing import prepare
-from segmentation import build_context
+from preprocessing import preprocess
+from segmentation import segment_glove, glove_found, get_background_color
 from defect_detection import run_all_detectors, draw_results
 
 GLOVE = (190, 120, 40)   # glove colour (BGR, blue)
@@ -91,10 +91,14 @@ NO_GLOVE = ("No Glove", "No Glove", "No Glove")
 def analyse(img):
     """Run the full pipeline, return (enclosed-hole count, open-tear count,
     stain count). Returns NO_GLOVE if no glove was found."""
-    ctx = build_context(*prepare(img))
-    if not ctx["ok"]:
+    img_norm, img_plain = preprocess(img)
+    mask_filled, mask_raw = segment_glove(img_norm)
+    ok, ratio = glove_found(mask_filled)
+    if not ok:
         return NO_GLOVE
-    names = [n for n, _ in run_all_detectors(ctx)]
+    bg_color = get_background_color(img_norm)
+    defects, _ = run_all_detectors(img_norm, mask_filled, mask_raw, bg_color)
+    names = [n for n, _ in defects]
     return (names.count("Tear / Hole"),
             names.count("Open Tear"),
             names.count("Stain"))
@@ -223,11 +227,14 @@ def main():
     # Save the baseline scenario's annotated result as an image, so it's
     # easy to eyeball whether the boxes look right
     img = make_glove_image()
-    ctx = build_context(*prepare(img))
+    img_norm, img_plain = preprocess(img)
+    mask_filled, mask_raw = segment_glove(img_norm)
+    bg_color = get_background_color(img_norm)
+    defects, _ = run_all_detectors(img_norm, mask_filled, mask_raw, bg_color)
     out_dir = os.path.join(os.path.dirname(__file__), "..", "dataset")
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.abspath(os.path.join(out_dir, "selftest_result.jpg"))
-    cv2.imwrite(out_path, draw_results(ctx["img_plain"], run_all_detectors(ctx)))
+    cv2.imwrite(out_path, draw_results(img_plain, defects))
     print(f"Annotated result saved to: {out_path}")
     print("=" * 84)
 

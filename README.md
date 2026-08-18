@@ -131,48 +131,49 @@ images that fail" -- i.e. the 40%-of-marks section.
    shape:**
 
 ```python
-def detect_wrinkles(ctx):
+def detect_wrinkles(img, mask_filled, mask_raw, bg_color):
     """Wrinkle detection"""
     ...
     return [("Wrinkle", (x, y, w, h)), ...]   # return [] if nothing was found
 ```
 
+All four parameters are passed to every detector; ignore whichever you
+don't need (e.g. `detect_open_tears` only uses `mask_filled`).
+
 2. Add the function's name to the `DETECTORS` list at the bottom of the file;
 3. The GUI calls it automatically -- no need to touch the interface code.
 
-### What's in the `ctx` dict (pull out whatever you need, no need to recompute anything)
+### What the four parameters are
 
-| Key | Contents | When to use it |
+| Parameter | Contents | When to use it |
 |---|---|---|
-| `ctx["img"]` | preprocessed + illumination-normalised BGR image | **colour-based** detection (stains, discolouration) |
-| `ctx["img_plain"]` | resized + denoised only, no illumination normalisation | **texture/edge-based** detection (wrinkles) |
-| `ctx["lab"]` | `img`'s Lab array (already converted) | computing colour distance |
-| `ctx["gray"]` | grayscale version | Canny, contours |
-| `ctx["mask_filled"]` | the glove's full outline (holes filled in) | testing "is this inside the glove" |
-| `ctx["mask_raw"]` | the glove's actual pixels (holes are black) | finding missing regions |
-| `ctx["bg_lab"]` | background reference colour | testing "is this the background showing through" |
-| `ctx["glove_lab"]` | the glove's normal colour | testing "is this colour normal" |
-| `ctx["area_ratio"]` | the glove's area as a fraction of the frame | size/shape abnormality detection |
-| `ctx["ok"]` | whether a glove was successfully found | usually no need to worry about this, the framework already handles it |
+| `img` | preprocessed + lighting-fixed BGR image | **colour-based** detection (stains, discolouration) |
+| `mask_filled` | the glove's full outline (holes filled in) | testing "is this inside the glove" |
+| `mask_raw` | the glove's actual pixels (holes are black) | finding missing regions |
+| `bg_color` | background reference colour (Lab) | testing "is this the background showing through" |
 
-> Why a dict instead of a long parameter list: the whole team is writing
-> 12 detectors, and every time one more thing is needed, a long parameter
-> list would mean changing all 12 function signatures and all 4 people
-> touching the code. With a dict, you just add a key -- no need to touch
-> anyone else's code.
+For the glove's normal colour, call
+`segmentation.get_glove_color(img, mask_raw)`; for its area fraction, call
+`segmentation.glove_found(mask_filled)`.
 
-`defect_detection.py` also has a ready-made helper at the top,
-`_boxes_from_mask(mask, min_area)`: give it a black-and-white image and it
-automatically finds connected blobs, filters out noise, and returns a list
-of bounding boxes.
+> Texture/edge-based detection (e.g. wrinkles) needs the image WITHOUT the
+> lighting fix -- call `preprocessing.preprocess(original_img,
+> fix_light=False)` yourself and use its second return value (`img_plain`),
+> don't use the `img` you were passed (it's already been through CLAHE,
+> which amplifies fabric texture and can turn normal texture into a false
+> wrinkle).
+
+`defect_detection.py` already has the tunable threshold constants at the
+top; follow the pattern in `detect_holes` / `detect_stains` rather than
+writing a separate helper module.
 
 ### A crashing detector won't take the rest of the system down with it
 
-Every detector runs in **isolation**. If your function raises an
-exception, or its return format is wrong, only yours gets skipped -- the
-rest still produce results as normal, and the error shows up in the GUI as
-`WARNING - N detector(s) failed`, and is tallied separately in
-`evaluate.py`.
+`run_all_detectors` wraps every detector in its own try/except. If your
+function raises an exception, or its return format is wrong, only yours
+gets skipped -- the rest still produce results as normal, and the error
+shows up in the GUI as `WARNING - N detector(s) failed`, and is tallied
+separately in `evaluate.py`.
 
 So **you don't need to worry about breaking the whole system while
 debugging** -- but do note: seeing that WARNING means your code has a bug,
@@ -182,13 +183,13 @@ accuracy.
 ### Duplicate detections are removed automatically
 
 The same defect is often reported by more than one detector at once (e.g.
-a large hole can also satisfy a "thin area" test). The framework
-automatically calls `deduplicate()` inside `run_all_detectors`, which
-keeps the higher-priority hit based on the **order defects are registered**
-in `DETECTORS`, so the same spot isn't double-counted and dragging
-precision down. **You don't need to worry about this when writing a
-detector**, but it's worth thinking about registration order: put more
-specific, more reliable detectors earlier in the list.
+a large hole can also satisfy a "thin area" test). `run_all_detectors`
+calls `deduplicate()` at the end, which keeps the higher-priority hit
+based on the **order defects are registered** in `DETECTORS`, so the same
+spot isn't double-counted and dragging precision down. **You don't need to
+worry about this when writing a detector**, but it's worth thinking about
+registration order: put more specific, more reliable detectors earlier in
+the list.
 
 Classical techniques you can draw on per defect:
 - Enclosed hole/puncture -> mask subtraction + **verifying the region's
