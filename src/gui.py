@@ -396,7 +396,7 @@ class GloveDefectApp:
         panel.image = None
 
     def _reset_detection_result(self):
-        """Clear stale output so it cannot be saved after changing inputs."""
+        """清除旧结果,防止换图/换 detector 后误保存上一次标注图。"""
         self.annotated_result = None
         self.save_button.configure(state=tk.DISABLED)
         self.affected_area_var.set("Affected area: —")
@@ -416,7 +416,7 @@ class GloveDefectApp:
         panel.image = photo
 
     def save_result(self):
-        """Save the current full-resolution annotated result as PNG or JPEG."""
+        """让用户把当前右侧的完整分辨率标注图保存成 PNG/JPEG。"""
         if self.annotated_result is None or self.selected_image_path is None:
             messagebox.showwarning(
                 "No Result", "Run detection before saving an annotated result."
@@ -426,9 +426,7 @@ class GloveDefectApp:
         output_dir = PROJECT_ROOT / "results"
         output_dir.mkdir(exist_ok=True)
         mode = re.sub(r"[^A-Za-z0-9]+", "_", self.detector_var.get()).strip("_")
-        default_name = (
-            f"{self.selected_image_path.stem}_{mode or 'detection'}_annotated.png"
-        )
+        default_name = f"{self.selected_image_path.stem}_{mode or 'detection'}_annotated.png"
         chosen = filedialog.asksaveasfilename(
             title="Save Annotated Detection Result",
             initialdir=str(output_dir),
@@ -448,10 +446,7 @@ class GloveDefectApp:
         if extension not in {".png", ".jpg", ".jpeg"}:
             path = path.with_suffix(".png")
             extension = ".png"
-        params = (
-            [cv2.IMWRITE_JPEG_QUALITY, 95]
-            if extension in {".jpg", ".jpeg"} else []
-        )
+        params = [cv2.IMWRITE_JPEG_QUALITY, 95] if extension in {".jpg", ".jpeg"} else []
         success, encoded = cv2.imencode(extension, self.annotated_result, params)
         if not success:
             messagebox.showerror("Save Error", "The annotated image could not be encoded.")
