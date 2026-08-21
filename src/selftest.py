@@ -41,7 +41,7 @@ BG = (60, 60, 200)       # background colour (BGR, red)
 def make_glove_image(stain_color=(100, 60, 20), hole=True, stain=True,
                      bright=1.0, offset=(0, 0), bg=BG, glove=GLOVE,
                      noise=0, side_light=False,
-                     open_tear=False, fingertip_tear=False):
+                     open_tear=False, fingertip_tear=False, two_tone=False):
     """Draw one simulated glove image; the parameters simulate different
     shooting conditions and defects."""
     img = np.full((600, 800, 3), bg, dtype=np.uint8)
@@ -55,6 +55,11 @@ def make_glove_image(stain_color=(100, 60, 20), hole=True, stain=True,
     for i, fx in enumerate([290, 345, 400, 455, 505]):
         cv2.ellipse(img, (fx + ox, 220 + oy), (18, 90 - abs(i - 2) * 12),
                     0, 0, 360, glove, -1)
+
+    if two_tone:  # a coated glove's dark fabric cuff is normal material, not a stain
+        cuff_color = tuple(max(int(channel * 0.55), 20) for channel in glove)
+        cv2.rectangle(img, (330 + ox, 475 + oy), (470 + ox, 560 + oy),
+                      cuff_color, -1)
 
     if hole:   # defect 1: enclosed hole (reveals the background colour)
         cv2.circle(img, (430 + ox, 330 + oy), 22, bg, -1)
@@ -112,6 +117,8 @@ def build_cases():
         ("Off-colour stain (white powder mark)", make_glove_image(stain_color=(240, 240, 240)),      (1, 0, 1)),
         ("Clean glove (expect zero false positives)", make_glove_image(hole=False, stain=False),      (0, 0, 0)),
         ("Clean glove + noise sigma=8",          make_glove_image(hole=False, stain=False, noise=8), (0, 0, 0)),
+        ("Clean two-tone material",               make_glove_image(hole=False, stain=False,
+                                                   two_tone=True),                                  (0, 0, 0)),
         ("Low light: overall 60% darker",        make_glove_image(bright=0.6),                       (1, 0, 1)),
         ("Bright light: overall 140% brighter",  make_glove_image(bright=1.4),                       (1, 0, 1)),
         ("Side lighting (dark left, bright right)", make_glove_image(side_light=True),                (1, 0, 1)),
