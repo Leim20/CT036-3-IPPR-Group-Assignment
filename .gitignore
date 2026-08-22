@@ -13,6 +13,13 @@ __pycache__/
 dataset/selftest_result.jpg
 dataset/evaluation_result.csv
 dataset/failures/
+dataset/generated/
+
+# Private assignment photographs. Keep only the empty folder structure in Git;
+# raw images and any other local dataset content must not enter the public repo.
+dataset/raw/**
+!dataset/raw/**/
+!dataset/raw/**/.gitkeep
 
 # Local machine-specific config
 .claude/settings.local.json

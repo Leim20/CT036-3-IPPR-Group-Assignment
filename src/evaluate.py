@@ -16,14 +16,21 @@ Maps onto these assignment requirements:
 bounding-box annotation needed) =====
 
     dataset/raw/
-      latex/                 <- material name (at least 3)
-        hole/       *.jpg    <- folder name = the defect(s) these images should contain
-        open_tear/  *.jpg
-        stain/      *.jpg
-        hole+stain/ *.jpg    <- a "+" joins multiple defects present in one image
-        good/       *.jpg    <- clean gloves, used to measure the false-positive rate
-      rubber/ ...
-      leather/ ...
+      hole/                  <- defect name
+        cotton/     *.jpg    <- material name
+        nitrile/    *.jpg
+        latex_foam/ *.jpg
+      finger_not_enough/
+        cotton/     *.jpg
+        nitrile/    *.jpg
+      thin/
+        cotton/     *.jpg
+        nitrile/    *.jpg
+      good/                  <- clean gloves, used to measure false positives
+        cotton/     *.jpg
+
+Multiple labels can be joined with "+", for example
+``hole+thin/cotton/example.jpg``.
 
 The folder-name -> defect-label lookup table is LABEL_MAP below.
 Whenever a team member adds a new detector, add a matching row to it.
@@ -35,37 +42,32 @@ import sys
 from collections import defaultdict
 
 import cv2
-import numpy as np
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-from preprocessing import preprocess
-from segmentation import segment_glove, glove_found, get_background_color
-from defect_detection import run_all_detectors, draw_results
+from pipeline import process_image
 
 # folder name (lowercase) -> the defect label a detector actually returns
 # The left side can be whatever you like; the right side MUST exactly
 # match the string returned by the detector.
 LABEL_MAP = {
-    "hole": "Tear / Hole",
-    "tear": "Tear / Hole",
-    "puncture": "Tear / Hole",
+    "hole": "Hole",
+    "puncture": "Hole",
+    "tear": "Open Tear",
     "open_tear": "Open Tear",
     "fingertip_tear": "Open Tear",
     "stain": "Stain",
     "dirty": "Stain",
+    "finger_not_enough": "Finger Not Enough",
+    "missing_finger": "Finger Not Enough",  # legacy folder-name alias
+    "thin": "Thin / Overstretched",
+    "overstretched": "Thin / Overstretched",
+    "thin_overstretched": "Thin / Overstretched",
     # add new detectors here as team members finish them, e.g. "wrinkle": "Wrinkle",
 }
 
 GOOD_DIR_NAMES = {"good", "ok", "normal", "pass"}   # folder names that mean "clean glove"
-IMG_EXT = {".jpg", ".jpeg", ".png", ".bmp"}
-
-
-def imread_unicode(path):
-    """Read an image, tolerant of non-ASCII paths (cv2.imread returns None
-    for those)."""
-    data = np.fromfile(path, dtype=np.uint8)
-    return cv2.imdecode(data, cv2.IMREAD_COLOR)
+IMG_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
 
 
 def parse_expected(folder_name):
@@ -89,18 +91,18 @@ def collect_images(root):
     items = []
     if not os.path.isdir(root):
         return items
-    for material in sorted(os.listdir(root)):
-        mat_dir = os.path.join(root, material)
-        if not os.path.isdir(mat_dir):
+    for defect_dir in sorted(os.listdir(root)):
+        defect_path = os.path.join(root, defect_dir)
+        if not os.path.isdir(defect_path):
             continue
-        for defect_dir in sorted(os.listdir(mat_dir)):
-            d = os.path.join(mat_dir, defect_dir)
-            if not os.path.isdir(d):
+        expected = parse_expected(defect_dir)
+        for material in sorted(os.listdir(defect_path)):
+            material_path = os.path.join(defect_path, material)
+            if not os.path.isdir(material_path):
                 continue
-            expected = parse_expected(defect_dir)
-            for fn in sorted(os.listdir(d)):
+            for fn in sorted(os.listdir(material_path)):
                 if os.path.splitext(fn)[1].lower() in IMG_EXT:
-                    items.append((os.path.join(d, fn), material, expected))
+                    items.append((os.path.join(material_path, fn), material, expected))
     return items
 
 
@@ -124,25 +126,21 @@ def evaluate(root, save_failures=False):
         os.makedirs(fail_dir, exist_ok=True)
 
     for path, material, expected in items:
-        img = imread_unicode(path)
-        if img is None:
+        result = process_image(path, material=material)
+        if result["original_image"] is None:
             rows.append([path, material, "|".join(sorted(expected)), "", "failed to read image"])
             failures.append((path, "failed to read image"))
             continue
 
-        img_norm, img_plain = preprocess(img)
-        mask_filled, mask_raw = segment_glove(img_norm)
-        ok, ratio = glove_found(mask_filled)
-
-        if not ok:
+        if not result["glove_found"]:
             n_noglove += 1
             detected = set()
             defects = []
             verdict = "segmentation failed (no glove detected)"
             failures.append((path, verdict))
         else:
-            bg_color = get_background_color(img_norm)
-            defects, errs = run_all_detectors(img_norm, mask_filled, mask_raw, bg_color)
+            defects = result["defects"]
+            errs = result["errors"]
             detected = {n for n, _ in defects}
             verdict = "correct" if detected == expected else "mismatch"
             # a detector crashing is a code bug, not an accuracy issue --
@@ -174,9 +172,9 @@ def evaluate(root, save_failures=False):
         if verdict != "correct":
             if verdict == "mismatch":
                 failures.append((path, f"expected {sorted(expected)} got {sorted(detected)}"))
-            if save_failures and ok:
+            if save_failures and result["glove_found"]:
                 out = os.path.join(fail_dir, material + "_" + os.path.basename(path))
-                cv2.imwrite(out, draw_results(img_plain, defects))
+                cv2.imwrite(out, result["result_image"])
 
         rows.append([path, material, "|".join(sorted(expected)),
                      "|".join(sorted(detected)), verdict])

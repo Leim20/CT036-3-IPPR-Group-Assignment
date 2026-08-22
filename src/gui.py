@@ -13,17 +13,16 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 import cv2
-import numpy as np
 from PIL import Image, ImageTk
 
 from preprocessing import preprocess
-from segmentation import segment_glove, glove_found, get_background_color
-from defect_detection import DETECTORS, run_all_detectors, draw_results
+from defect_detection import DETECTORS
+from pipeline import read_image, process_image_array
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATASET_DIR = PROJECT_ROOT / "dataset" / "raw"
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".gif"}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
 
 PANEL_W = 460
 PANEL_H = 340
@@ -45,20 +44,21 @@ QUESTION_PAPER_DEFECTS = (
 )
 
 ADDITIONAL_GROUP_DEFECTS = (
-    "Hole / Puncture",
+    "Hole",
     "Open Tear",
     "Stain",
-    "Missing Finger",
+    "Finger Not Enough",
     "Fused Fingers",
 )
 
 DEFECT_OPTIONS = QUESTION_PAPER_DEFECTS + ADDITIONAL_GROUP_DEFECTS
 
 DETECTOR_LABELS = {
-    "detect_holes": "Hole / Puncture",
+    "detect_holes": "Hole",
     "detect_open_tears": "Open Tear",
     "detect_stains": "Stain",
-    "detect_missing_finger": "Missing Finger",
+    "detect_finger_not_enough": "Finger Not Enough",
+    "detect_missing_finger": "Finger Not Enough",  # legacy function-name alias
     "detect_fused_fingers": "Fused Fingers",
     "detect_discoloration": "Discoloration",
     "detect_oversize": "Oversize",
@@ -92,7 +92,7 @@ def find_dataset_images(dataset_dir=DATASET_DIR):
 
 
 def display_path(path, dataset_dir=DATASET_DIR):
-    """Show a short ``material / defect / filename`` path in the dropdown."""
+    """Show a short ``defect / material / filename`` path in the dropdown."""
     try:
         return path.relative_to(dataset_dir).as_posix()
     except ValueError:
@@ -105,7 +105,7 @@ class GloveDefectApp:
         self.root.title("Glove Defect Detection System (GDD)")
         self.root.minsize(980, 720)
 
-        self.img_norm = None
+        self.img_source = None
         self.img_plain = None
         self.selected_image_path = None
         self.image_paths = {}
@@ -259,7 +259,7 @@ class GloveDefectApp:
         if current not in self.image_paths and current != IMAGE_PLACEHOLDER:
             self.image_var.set(IMAGE_PLACEHOLDER)
             self.selected_image_path = None
-            self.img_norm = None
+            self.img_source = None
             self.img_plain = None
             self._clear_panel(self.panel_left, "Select a dataset image above")
             self._clear_panel(self.panel_right, "Run detection to view the result")
@@ -273,17 +273,18 @@ class GloveDefectApp:
             self._update_run_button()
             return
 
-        img = cv2.imdecode(np.fromfile(path, dtype="uint8"), cv2.IMREAD_COLOR)
+        img = read_image(path)
         if img is None:
             self.selected_image_path = None
-            self.img_norm = None
+            self.img_source = None
             self.img_plain = None
             self._update_run_button()
             messagebox.showerror("Image Error", f"Cannot read this image:\n{path}")
             return
 
         self.selected_image_path = path
-        self.img_norm, self.img_plain = preprocess(img)
+        self.img_source = img
+        _, self.img_plain = preprocess(img)
         self.show_on_panel(self.panel_left, self.img_plain)
         self._clear_panel(self.panel_right, "Run detection to view the result")
         self._show_ready_message()
@@ -303,7 +304,7 @@ class GloveDefectApp:
         return [detector] if detector is not None else []
 
     def _update_run_button(self):
-        ready = self.img_norm is not None and bool(self._selected_detectors())
+        ready = self.img_source is not None and bool(self._selected_detectors())
         self.run_button.configure(state=tk.NORMAL if ready else tk.DISABLED)
 
     def _show_ready_message(self):
@@ -361,7 +362,7 @@ class GloveDefectApp:
         self.result_box.configure(state=tk.DISABLED)
 
     def detect(self):
-        if self.img_norm is None or self.selected_image_path is None:
+        if self.img_source is None or self.selected_image_path is None:
             messagebox.showwarning("Image Required", "Please select a test image.")
             return
 
@@ -394,10 +395,15 @@ class GloveDefectApp:
             self._update_run_button()
 
     def _detect(self, detectors):
-        mask_filled, mask_raw = segment_glove(self.img_norm)
-        ok, ratio = glove_found(mask_filled)
+        material = Path(self.selected_image_path).parent.name
+        result = process_image_array(
+            self.img_source,
+            material=material,
+            detectors=detectors,
+        )
+        ratio = result["features"]["glove_area_ratio"]
 
-        if not ok:
+        if not result["glove_found"]:
             self.show_on_panel(self.panel_right, self.img_plain)
             self.say(
                 "Status: NO GLOVE DETECTED\n"
@@ -408,16 +414,9 @@ class GloveDefectApp:
             )
             return
 
-        bg_color = get_background_color(self.img_norm)
-        defects, errors = run_all_detectors(
-            self.img_norm,
-            mask_filled,
-            mask_raw,
-            bg_color,
-            detectors=detectors,
-        )
-        result_img = draw_results(self.img_plain, defects)
-        self.show_on_panel(self.panel_right, result_img)
+        defects = result["defects"]
+        errors = result["errors"]
+        self.show_on_panel(self.panel_right, result["result_image"])
 
         mode = self.detector_var.get()
         if defects:

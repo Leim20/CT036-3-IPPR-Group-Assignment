@@ -99,7 +99,7 @@ def analyse(img):
     bg_color = get_background_color(img_norm)
     defects, _ = run_all_detectors(img_norm, mask_filled, mask_raw, bg_color)
     names = [n for n, _ in defects]
-    return (names.count("Tear / Hole"),
+    return (names.count("Hole"),
             names.count("Open Tear"),
             names.count("Stain"))
 

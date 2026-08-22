@@ -40,7 +40,7 @@ processing and are not recommended:
 
 | Family | Defect (Figure 1 naming) | Core algorithm | Difficulty | Status | Suggested owner |
 |---|---|---|---|---|---|
-| 1. Mask subtraction + background-colour check | Hole / Puncture | `mask_filled - mask_raw`, candidate region's average colour approx equal to the background colour | Easy | Done: `detect_holes` | **Member A** |
+| 1. Mask subtraction + background-colour check | Hole | `mask_filled - mask_raw`, candidate region's average colour approx equal to the background colour | Easy | Done: `detect_holes` | **Member A** |
 | 2. Convexity defects (narrow + sharp) | Tearing / Open Tear | convexity defects, mouth-width/depth ratio < 0.45 and apex angle < 24 deg | Medium | Done: `detect_open_tears` | **Member A** |
 | 2. Convexity defects (narrow + sharp, restricted to the fingertip region) | Tearing (fingertip) | same algorithm + a position test ("the notch apex sits in the glove's top quarter") | Medium | Covered by the regression suite | **Member A** |
 | 3. Convexity-defect counting (peaks) | Finger Not Enough / Missing Finger | count convex-hull peaks (fingertips); report if != 5 | Medium | Not started | **Member B** |
@@ -83,19 +83,11 @@ satisfying the assignment's hard requirement.
   exist in `dataset/raw/<material>/good/` -- synthetic images can't
   produce trustworthy numbers here.
 
-## An open decision that affects `LABEL_MAP` and dataset folder naming
+## Hole and open-tear naming
 
-`detect_holes` currently outputs the label **`"Tear / Hole"`**, but under
-this assignment plan, `Tearing` and `Hole/Puncture` are already two
-separate defects (`Tearing` is output as `"Open Tear"` by
-`detect_open_tears`).
-
-Recommendation: rename `detect_holes`'s label from `"Tear / Hole"` to
-`"Hole / Puncture"`, to separate it more clearly from `"Open Tear"` and
-match Figure 1's naming. This change would touch
-`src/defect_detection.py`, `src/selftest.py`, `src/evaluate.py`'s
-`LABEL_MAP`, and a few spots in `README.md` -- **left untouched for now;
-confirm with the team and it can be applied everywhere in one pass.**
+`detect_holes` outputs **`"Hole"`**. Tearing is a separate defect and is
+output as `"Open Tear"` by `detect_open_tears`, so the GUI, evaluator and
+dataset labels do not combine the two classes.
 
 ---
 
