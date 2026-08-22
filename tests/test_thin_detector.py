@@ -9,6 +9,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from defect_detection import detect_thin_area
+from pipeline import infer_material
 
 
 class ThinDetectorTests(unittest.TestCase):
@@ -51,7 +52,7 @@ class ThinDetectorTests(unittest.TestCase):
         hits = self.detect(image, mask, "cotton")
         self.assertEqual("Thin / Overstretched", hits[0][0])
 
-    def test_one_white_cotton_hole_is_not_diffuse_thinning(self):
+    def test_one_white_cotton_tear_is_not_diffuse_thinning(self):
         image, mask = self.make_scene((235, 235, 235))
         cv2.circle(image, (260, 210), 18, self.SKIN, cv2.FILLED)
         self.assertEqual([], self.detect(image, mask, "cotton"))
@@ -61,6 +62,43 @@ class ThinDetectorTests(unittest.TestCase):
         cv2.rectangle(image, (120, 75), (400, 345), self.PALE_BLUE, cv2.FILLED)
         hits = self.detect(image, mask, "nitrile")
         self.assertEqual("Thin / Overstretched", hits[0][0])
+
+    def test_pale_nitrile_isolated_from_blue_purple_background(self):
+        """A hue-adjacent backdrop must not replace the glove material ROI."""
+        image = np.full((420, 520, 3), (116, 81, 81), np.uint8)
+        mask = np.zeros(image.shape[:2], np.uint8)
+        cv2.rectangle(mask, (100, 55), (420, 365), 255, cv2.FILLED)
+        image[mask > 0] = self.PALE_BLUE
+
+        hits = self.detect(image, mask, "nitrile")
+
+        self.assertEqual("Thin / Overstretched", hits[0][0])
+
+    def test_flat_dataset_filename_is_not_used_as_material_metadata(self):
+        self.assertIsNone(
+            infer_material("dataset/raw/nitrile_005.jpg", "raw")
+        )
+
+    def test_material_folder_remains_trusted_metadata(self):
+        self.assertEqual(
+            "nitrile",
+            infer_material("dataset/raw/thin/nitrile/example.jpg", "nitrile"),
+        )
+
+    def test_auto_mode_detects_pale_nitrile_without_metadata(self):
+        image = np.full((420, 520, 3), (116, 81, 81), np.uint8)
+        mask = np.zeros(image.shape[:2], np.uint8)
+        cv2.rectangle(mask, (100, 55), (420, 365), 255, cv2.FILLED)
+        image[mask > 0] = self.PALE_BLUE
+
+        hits = self.detect(image, mask, None)
+
+        self.assertEqual("Thin / Overstretched", hits[0].name)
+        self.assertGreater(hits[0].evidence, 0.0)
+
+    def test_auto_mode_rejects_opaque_blue_glove(self):
+        image, mask = self.make_scene(self.OPAQUE_BLUE)
+        self.assertEqual([], self.detect(image, mask, None))
 
 
 if __name__ == "__main__":

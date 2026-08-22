@@ -14,10 +14,10 @@ as the "glove colour":
   - more importantly it is logically wrong: with a "glove colour"
     reference, segmentation throws away every pixel that does not look
     like the glove -- and a stain is exactly such a pixel. The stain
-    detector would then never see it, while the hole detector would
-    report it as a "hole" (wrong defect type).
+    detector would then never see it, while the tearing detector would
+    report it as "Tearing" (wrong defect type).
   With a background reference, a stain stays inside the mask because it
-  "is not the background colour", and a hole becomes a hole candidate
+  "is not the background colour", and a tear becomes a tearing candidate
   because what shows through it *is* the background colour. Both problems
   disappear on their own, with no special-casing.
 """
@@ -58,11 +58,11 @@ def get_background_color(img):
 
 def segment_glove(img):
     """Return (mask_filled, mask_raw):
-    - mask_raw   : the glove's actual pixels (a hole is black there, because
-                   what shows through a hole is the background)
-    - mask_filled: the glove's outline filled in solid (holes turn white too)
+    - mask_raw   : the glove's actual pixels (a tear is black there, because
+                   what shows through a tear is the background)
+    - mask_filled: the glove's outline filled in solid (tears turn white too)
     The difference between them = "inside the outline but coloured like the
-    background" -> hole candidates.
+    background" -> tearing candidates.
     """
     bg_color = get_background_color(img)
     lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB).astype(np.float32)

@@ -50,8 +50,9 @@ from pipeline import process_image
 # folder name (lower-case) -> the defect name the detector returns
 # The left side is up to you; the right side must match the detector exactly.
 LABEL_MAP = {
-    "hole": "Hole",
-    "puncture": "Hole",
+    "hole": "Tearing",       # legacy dataset-folder name
+    "puncture": "Tearing",
+    "tearing": "Tearing",
     "tear": "Open Tear",
     "open_tear": "Open Tear",
     "fingertip_tear": "Open Tear",

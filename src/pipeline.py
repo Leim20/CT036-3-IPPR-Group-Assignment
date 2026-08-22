@@ -19,6 +19,35 @@ from defect_detection import (
 )
 
 
+def infer_material(image_path=None, material=None):
+    """Resolve trusted material metadata without inspecting the filename.
+
+    A recognised explicit value or material folder is retained. Images stored
+    directly in ``dataset/raw`` and uploaded photos return ``None`` so the Thin
+    detector evaluates its image-content rules automatically.
+    """
+    candidates = []
+    if material is not None:
+        candidates.append(str(material))
+    if image_path is not None:
+        path = Path(image_path)
+        candidates.append(path.parent.name)
+
+    for candidate in candidates:
+        normalized = "".join(
+            character.lower() if character.isalnum() else "_"
+            for character in candidate
+        )
+        normalized = "_".join(part for part in normalized.split("_") if part)
+        if "latex_foam" in normalized:
+            return "latex_foam"
+        if "nitrile" in normalized:
+            return "nitrile"
+        if "cotton" in normalized:
+            return "cotton"
+    return None
+
+
 def read_image(image_path):
     """Read an image from a path, including paths with non-ASCII characters."""
     try:
@@ -150,6 +179,6 @@ def process_image(image_path, material=None, detectors=None):
     """Read ``image_path`` and run the shared inspection pipeline."""
     return process_image_array(
         read_image(image_path),
-        material=material,
+        material=infer_material(image_path, material),
         detectors=detectors,
     )
