@@ -18,7 +18,7 @@ class FingerNotEnoughDetectorTests(unittest.TestCase):
     SKIN = (90, 145, 205)        # skin-like BGR
 
     def make_scene(self, mask, skin_box=None):
-        image = np.full((500, 500, 3), self.BACKGROUND, dtype=np.uint8)
+        image = np.full((*mask.shape, 3), self.BACKGROUND, dtype=np.uint8)
         image[mask > 0] = self.GLOVE
         if skin_box is not None:
             x1, y1, x2, y2 = skin_box
@@ -47,16 +47,16 @@ class FingerNotEnoughDetectorTests(unittest.TestCase):
 
         self.assertEqual(1, len(result))
         self.assertEqual("Finger Not Enough", result[0][0])
+        self.assertGreater(result[0].evidence, 0.0)
 
-    def test_exposed_skin_in_finger_zone_is_finger_not_enough(self):
+    def test_skin_coloured_patch_without_shape_change_is_not_missing_finger(self):
         mask = np.zeros((500, 500), dtype=np.uint8)
         cv2.rectangle(mask, (100, 50), (400, 450), 255, cv2.FILLED)
         image, bg_color = self.make_scene(mask, skin_box=(220, 50, 275, 105))
 
         result = self.detect(image, mask, bg_color)
 
-        self.assertEqual(1, len(result))
-        self.assertEqual("Finger Not Enough", result[0][0])
+        self.assertEqual([], result)
 
     def test_enclosed_skin_patch_is_not_a_missing_finger(self):
         mask = np.zeros((500, 500), dtype=np.uint8)
@@ -75,6 +75,55 @@ class FingerNotEnoughDetectorTests(unittest.TestCase):
         result = self.detect(image, mask, bg_color)
 
         self.assertEqual([], result)
+
+    def test_clean_horizontal_five_finger_glove_has_no_finger_defect(self):
+        """A broad wrist-to-hull gap is not a gap between two fingers."""
+        mask = np.zeros((500, 800), dtype=np.uint8)
+        cv2.rectangle(mask, (0, 140), (440, 370), 255, cv2.FILLED)
+        for x1, y1, x2, y2 in (
+            (380, 65, 650, 140),
+            (430, 140, 730, 180),
+            (430, 190, 760, 230),
+            (430, 240, 735, 280),
+            (410, 290, 680, 335),
+        ):
+            cv2.rectangle(mask, (x1, y1), (x2, y2), 255, cv2.FILLED)
+        image, bg_color = self.make_scene(mask)
+
+        result = self.detect(image, mask, bg_color)
+
+        self.assertEqual([], result)
+
+    def test_visible_wrist_is_not_an_exposed_finger(self):
+        mask = np.zeros((500, 800), dtype=np.uint8)
+        cv2.rectangle(mask, (0, 140), (440, 370), 255, cv2.FILLED)
+        for x1, y1, x2, y2 in (
+            (380, 65, 650, 140),
+            (430, 140, 730, 180),
+            (430, 190, 760, 230),
+            (430, 240, 735, 280),
+            (410, 290, 680, 335),
+        ):
+            cv2.rectangle(mask, (x1, y1), (x2, y2), 255, cv2.FILLED)
+        image, bg_color = self.make_scene(mask, skin_box=(0, 140, 170, 370))
+
+        result = self.detect(image, mask, bg_color)
+
+        self.assertEqual([], result)
+
+    def test_horizontal_missing_finger_is_orientation_normalised(self):
+        upright = np.zeros((500, 350), dtype=np.uint8)
+        cv2.rectangle(upright, (25, 240), (325, 450), 255, cv2.FILLED)
+        cv2.rectangle(upright, (75, 60), (145, 240), 255, cv2.FILLED)
+        cv2.rectangle(upright, (205, 60), (275, 240), 255, cv2.FILLED)
+        mask = cv2.rotate(upright, cv2.ROTATE_90_CLOCKWISE)
+        image, bg_color = self.make_scene(mask)
+
+        result = self.detect(image, mask, bg_color)
+
+        self.assertEqual(1, len(result))
+        self.assertEqual("Finger Not Enough", result[0].name)
+        self.assertGreater(result[0].evidence, 0.0)
 
 
 if __name__ == "__main__":

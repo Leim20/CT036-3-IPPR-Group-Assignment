@@ -235,6 +235,7 @@ SKIN_S_MIN, SKIN_V_MIN = 25, 45
 # fingers create more skin-coloured regions and silhouette variation.
 FINGER_NOT_ENOUGH_DEFAULT_RULE = {
     "indent_min_area_ratio": 0.004,
+    "indent_max_width_ratio": 0.45,
     "indent_max_y_ratio": 0.55,
     "indent_target_count": 3,
     "row_min_width_ratio": 0.06,
@@ -242,12 +243,14 @@ FINGER_NOT_ENOUGH_DEFAULT_RULE = {
     "row_support_ratio": 0.08,
     "row_target_count": 2,
     "skin_min_area_ratio": 0.012,
+    "skin_max_width_ratio": 0.30,
     "skin_min_boundary_ratio": 0.05,
     "skin_max_y_ratio": 0.72,
 }
 FINGER_NOT_ENOUGH_MATERIAL_RULES = {
     "cotton": {
         "indent_min_area_ratio": 0.010,
+        "indent_max_width_ratio": 0.45,
         "indent_max_y_ratio": 0.75,
         "indent_target_count": 4,
         "row_min_width_ratio": 0.06,
@@ -255,11 +258,13 @@ FINGER_NOT_ENOUGH_MATERIAL_RULES = {
         "row_support_ratio": 0.08,
         "row_target_count": 2,
         "skin_min_area_ratio": 0.024,
+        "skin_max_width_ratio": 0.30,
         "skin_min_boundary_ratio": 0.05,
         "skin_max_y_ratio": 0.72,
     },
     "latex_foam": {
         "indent_min_area_ratio": 0.001,
+        "indent_max_width_ratio": 0.45,
         "indent_max_y_ratio": 0.55,
         "indent_target_count": 3,
         "row_min_width_ratio": 0.04,
@@ -267,11 +272,13 @@ FINGER_NOT_ENOUGH_MATERIAL_RULES = {
         "row_support_ratio": 0.06,
         "row_target_count": 2,
         "skin_min_area_ratio": 0.004,
+        "skin_max_width_ratio": 0.30,
         "skin_min_boundary_ratio": 0.10,
         "skin_max_y_ratio": 0.72,
     },
     "nitrile": {
         "indent_min_area_ratio": 0.001,
+        "indent_max_width_ratio": 0.45,
         "indent_max_y_ratio": 0.55,
         "indent_target_count": 2,
         "row_min_width_ratio": 0.04,
@@ -279,6 +286,7 @@ FINGER_NOT_ENOUGH_MATERIAL_RULES = {
         "row_support_ratio": 0.08,
         "row_target_count": 3,
         "skin_min_area_ratio": 0.004,
+        "skin_max_width_ratio": 0.30,
         "skin_min_boundary_ratio": 0.05,
         "skin_max_y_ratio": 0.72,
     },
@@ -629,7 +637,9 @@ def detect_finger_not_enough(img, mask_filled, mask_raw, bg_color,
     bare finger, while others have one glove finger folded out of view.
 
     1. A sufficiently large skin-coloured component inside the upper glove
-       silhouette indicates an exposed finger.
+       silhouette supports an exposed finger when the silhouette also has a
+       missing finger column. Colour alone is insufficient because a brown
+       stain can fall inside the same broad skin-colour thresholds.
     2. Convex-hull indentation count describes the missing space between the
        remaining finger shapes.
     3. The number of persistent foreground runs across upper rows describes
@@ -654,6 +664,56 @@ def detect_finger_not_enough(img, mask_filled, mask_raw, bg_color,
     if width <= 0 or height <= 0:
         return []
 
+    # The measurements below describe finger columns from top to palm. Real
+    # inspection photos are commonly landscape, with the wrist entering from
+    # either side. Normalise just this detector to an upright silhouette, then
+    # map an accepted box back to the caller's coordinates. The wider/more
+    # occupied end is the wrist; the opposite end contains the fingertips.
+    if width > height:
+        crop = mask_filled[y0:y0 + height, x:x + width] > 0
+        band_width = max(1, int(round(width * 0.12)))
+        left_support = int(np.count_nonzero(crop[:, :band_width]))
+        right_support = int(np.count_nonzero(crop[:, -band_width:]))
+        rotation = (
+            cv2.ROTATE_90_COUNTERCLOCKWISE
+            if left_support >= right_support
+            else cv2.ROTATE_90_CLOCKWISE
+        )
+        rotated_results = detect_finger_not_enough(
+            cv2.rotate(img, rotation),
+            cv2.rotate(mask_filled, rotation),
+            cv2.rotate(mask_raw, rotation),
+            bg_color,
+            img_plain=(
+                cv2.rotate(img_plain, rotation)
+                if img_plain is not None else None
+            ),
+            material=material,
+        )
+        mapped_results = []
+        image_height, image_width = mask_filled.shape[:2]
+        for result in rotated_results:
+            rx, ry, rw, rh = result.box
+            if rotation == cv2.ROTATE_90_COUNTERCLOCKWISE:
+                mapped_box = (image_width - ry - rh, rx, rh, rw)
+                mapped_mask = (
+                    cv2.rotate(result.mask, cv2.ROTATE_90_CLOCKWISE)
+                    if result.mask is not None else None
+                )
+            else:
+                mapped_box = (ry, image_height - rx - rw, rh, rw)
+                mapped_mask = (
+                    cv2.rotate(result.mask, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                    if result.mask is not None else None
+                )
+            mapped_results.append(Detection(
+                result.name,
+                tuple(int(value) for value in mapped_box),
+                mapped_mask,
+                result.evidence,
+            ))
+        return mapped_results
+
     material_key = str(material).lower() if material is not None else None
     rule = FINGER_NOT_ENOUGH_MATERIAL_RULES.get(
         material_key, FINGER_NOT_ENOUGH_DEFAULT_RULE
@@ -673,6 +733,7 @@ def detect_finger_not_enough(img, mask_filled, mask_raw, bg_color,
         )
     )
     qualifying_indentations = 0
+    indentation_strengths = []
     largest_indentation_box = None
     largest_indentation_area = -1
     for label in range(1, indent_count):
@@ -682,11 +743,34 @@ def detect_finger_not_enough(img, mask_filled, mask_raw, bg_color,
         centroid_y_ratio = (
             float(indent_centroids[label, 1]) - y0
         ) / max(height, 1)
+        component_width_ratio = (
+            float(indent_stats[label, cv2.CC_STAT_WIDTH]) / max(width, 1)
+        )
         if (
             component_area_ratio >= rule["indent_min_area_ratio"]
+            and component_width_ratio <= rule["indent_max_width_ratio"]
             and centroid_y_ratio <= rule["indent_max_y_ratio"]
         ):
             qualifying_indentations += 1
+            area_fit = min(
+                1.0,
+                component_area_ratio
+                / max(4.0 * rule["indent_min_area_ratio"], 1e-6),
+            )
+            width_fit = np.clip(
+                1.0
+                - component_width_ratio / rule["indent_max_width_ratio"],
+                0.0,
+                1.0,
+            )
+            vertical_fit = np.clip(
+                1.0 - centroid_y_ratio / rule["indent_max_y_ratio"],
+                0.0,
+                1.0,
+            )
+            indentation_strengths.append(
+                0.50 * area_fit + 0.25 * width_fit + 0.25 * vertical_fit
+            )
             component_area = int(indent_stats[label, cv2.CC_STAT_AREA])
             if component_area > largest_indentation_area:
                 largest_indentation_area = component_area
@@ -780,10 +864,18 @@ def detect_finger_not_enough(img, mask_filled, mask_raw, bg_color,
     glove_boundary = (mask_filled > 0) & (eroded_glove == 0)
     exposed_skin = False
     exposed_skin_box = None
+    exposed_skin_strength = 0.0
     for label in range(1, skin_component_count):
         component_area = int(skin_stats[label, cv2.CC_STAT_AREA])
         component_area_ratio = float(component_area) / hull_area
         if component_area_ratio < rule["skin_min_area_ratio"]:
+            continue
+        component_width_ratio = (
+            float(skin_stats[label, cv2.CC_STAT_WIDTH]) / max(width, 1)
+        )
+        if component_width_ratio > rule["skin_max_width_ratio"]:
+            # Segmentation can include the wearer's forearm at the image edge.
+            # That broad skin region is not shaped like one exposed finger.
             continue
 
         component = skin_labels == label
@@ -805,19 +897,60 @@ def detect_finger_not_enough(img, mask_filled, mask_raw, bg_color,
                 int(skin_stats[label, cv2.CC_STAT_WIDTH]),
                 int(skin_stats[label, cv2.CC_STAT_HEIGHT]),
             )
+            area_fit = min(
+                1.0,
+                component_area_ratio
+                / max(2.0 * rule["skin_min_area_ratio"], 1e-6),
+            )
+            boundary_fit = min(
+                1.0,
+                boundary_ratio
+                / max(2.0 * rule["skin_min_boundary_ratio"], 1e-6),
+            )
+            vertical_fit = np.clip(
+                1.0 - component_y_ratio / rule["skin_max_y_ratio"],
+                0.0,
+                1.0,
+            )
+            exposed_skin_strength = float(
+                0.45 * area_fit + 0.35 * boundary_fit + 0.20 * vertical_fit
+            )
             break
     missing_space = (
         qualifying_indentations == rule["indent_target_count"]
     )
     missing_column = persistent_run_count == rule["row_target_count"]
-    if not (exposed_skin or missing_space or missing_column):
+    skin_with_shape_support = exposed_skin and missing_column
+    if not (missing_space or skin_with_shape_support):
         return []
+
+    indentation_strength = (
+        float(np.mean(indentation_strengths))
+        if missing_space and indentation_strengths
+        else 0.0
+    )
+    row_support = float(run_histogram[rule["row_target_count"]:].sum())
+    row_strength = (
+        min(1.0, row_support / max(2.0 * minimum_support_rows, 1.0))
+        if missing_column
+        else 0.0
+    )
+    skin_shape_strength = (
+        0.60 * exposed_skin_strength + 0.40 * row_strength
+        if skin_with_shape_support
+        else 0.0
+    )
+    cue_strength = max(indentation_strength, skin_shape_strength)
+    evidence = 50.0 + 50.0 * cue_strength
 
     # Localise the evidence for the display stage. Exposed skin is already a
     # real pixel region; otherwise the largest abnormal hull gap is the best
     # estimate of where a completely absent finger should have been. The full
     # upper zone remains a safe last resort for a row-count-only recognition.
-    result_box = exposed_skin_box or largest_indentation_box
+    result_box = (
+        exposed_skin_box if skin_with_shape_support
+        else largest_indentation_box
+    )
     if result_box is None:
         result_box = (
             x,
@@ -825,7 +958,11 @@ def detect_finger_not_enough(img, mask_filled, mask_raw, bg_color,
             width,
             min(finger_region_height, mask_filled.shape[0] - y0),
         )
-    return [("Finger Not Enough", result_box)]
+    return [Detection(
+        "Finger Not Enough",
+        result_box,
+        evidence=round(float(evidence), 1),
+    )]
 
 
 # ============================================================
