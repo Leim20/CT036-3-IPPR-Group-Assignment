@@ -47,6 +47,7 @@ QUESTION_PAPER_DEFECTS = (
 ADDITIONAL_GROUP_DEFECTS = (
     "Hole / Puncture",
     "Open Tear",
+    "Side Tear",
     "Stain",
     "Missing Finger",
     "Fused Fingers",
@@ -57,6 +58,7 @@ DEFECT_OPTIONS = QUESTION_PAPER_DEFECTS + ADDITIONAL_GROUP_DEFECTS
 DETECTOR_LABELS = {
     "detect_holes": "Hole / Puncture",
     "detect_open_tears": "Open Tear",
+    "detect_side_tear": "Side Tear",
     "detect_stains": "Stain",
     "detect_missing_finger": "Missing Finger",
     "detect_fused_fingers": "Fused Fingers",

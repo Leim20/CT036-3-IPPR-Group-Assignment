@@ -52,6 +52,8 @@ LABEL_MAP = {
     "puncture": "Tear / Hole",
     "open_tear": "Open Tear",
     "fingertip_tear": "Open Tear",
+    "side_tear": "Side Tear",
+    "edge_tear": "Side Tear",
     "stain": "Stain",
     "dirty": "Stain",
     # add new detectors here as team members finish them, e.g. "wrinkle": "Wrinkle",

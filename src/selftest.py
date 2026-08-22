@@ -99,9 +99,30 @@ def analyse(img):
     bg_color = get_background_color(img_norm)
     defects, _ = run_all_detectors(img_norm, mask_filled, mask_raw, bg_color)
     names = [n for n, _ in defects]
+    # "Open Tear" and "Side Tear" are counted together here on purpose:
+    # both mean "the glove edge is breached", which is what these
+    # scenarios assert, and combining them keeps every pre-existing
+    # expectation below valid now that the tear work is split between two
+    # detectors. Which of the two fired -- i.e. whether the position
+    # filter put the tear in the right class -- is asserted separately in
+    # build_side_tear_cases().
     return (names.count("Tear / Hole"),
-            names.count("Open Tear"),
+            names.count("Open Tear") + names.count("Side Tear"),
             names.count("Stain"))
+
+
+def tear_labels(img):
+    """Just the tear labels the pipeline produced, for the side-tear
+    scope tests: (side tear count, open tear count)."""
+    img_norm, _ = preprocess(img)
+    mask_filled, mask_raw = segment_glove(img_norm)
+    ok, _ = glove_found(mask_filled)
+    if not ok:
+        return NO_GLOVE[:2]
+    bg_color = get_background_color(img_norm)
+    defects, _ = run_all_detectors(img_norm, mask_filled, mask_raw, bg_color)
+    names = [n for n, _ in defects]
+    return names.count("Side Tear"), names.count("Open Tear")
 
 
 # Each scenario: (name, image, expected (hole count, tear count, stain count))
@@ -167,6 +188,43 @@ def build_material_cases():
     return cases
 
 
+def build_side_tear_cases():
+    """Scope tests for detect_side_tear: (side tear count, open tear count).
+
+    The pass-rate block above only checks that SOME tear was found. These
+    check the harder thing -- that the position filter routed each tear
+    to the right class, so the two tear detectors stay disjoint instead of
+    both claiming the same defect.
+    """
+    return [
+        ("Lateral tear -> Side Tear, not Open Tear",
+         make_glove_image(hole=False, stain=False, open_tear=True),          (1, 0)),
+        ("Fingertip tear -> Open Tear, not Side Tear",
+         make_glove_image(hole=False, stain=False, fingertip_tear=True),     (0, 1)),
+        ("Both tears -> one of each, no double-claim",
+         make_glove_image(hole=False, stain=False,
+                          open_tear=True, fingertip_tear=True),              (1, 1)),
+        ("Clean glove -> finger gaps are not tears",
+         make_glove_image(hole=False, stain=False),                          (0, 0)),
+        ("Lateral tear + enclosed hole (hole must not leak in)",
+         make_glove_image(stain=False, open_tear=True),                      (1, 0)),
+        ("Lateral tear, dim 60%",
+         make_glove_image(hole=False, stain=False, open_tear=True,
+                          bright=0.6),                                       (1, 0)),
+        ("Lateral tear, glove off-centre",
+         make_glove_image(hole=False, stain=False, open_tear=True,
+                          offset=(150, -60)),                                (1, 0)),
+        ("Lateral tear, noise sigma=8",
+         make_glove_image(hole=False, stain=False, open_tear=True, noise=8), (1, 0)),
+        ("Lateral tear on grey glove",
+         make_glove_image(hole=False, stain=False, open_tear=True,
+                          glove=(80, 80, 80)),                               (1, 0)),
+        ("Lateral tear on white glove",
+         make_glove_image(hole=False, stain=False, open_tear=True,
+                          glove=(235, 235, 235)),                            (1, 0)),
+    ]
+
+
 def build_known_issues():
     """Known, still-unresolved issues, run and printed separately, not
     counted in the pass rate above.
@@ -207,6 +265,21 @@ def main():
     print("-" * 84)
     print(f"Pass rate: {passed}/{len(cases)}")
 
+    # ---- side-tear scope tests: did the tear land in the RIGHT class? ----
+    side_cases = build_side_tear_cases()
+    print("\n" + "=" * 84)
+    print("Side tear scope tests -- (Side Tear count, Open Tear count)")
+    print("-" * 84)
+    side_passed = 0
+    for name, img, expect in side_cases:
+        got = tear_labels(img)
+        ok = got == expect
+        side_passed += ok
+        print(f"{name:<52}{str(expect):>10}{str(got):>10}{'  PASS' if ok else '  FAIL'}")
+    print("-" * 84)
+    print(f"Side tear pass rate: {side_passed}/{len(side_cases)}")
+    print("=" * 84)
+
     # ---- known limitations: run and printed separately, excluded from the pass rate above ----
     known = build_known_issues()
     print("\n" + "=" * 84)
@@ -239,7 +312,7 @@ def main():
     print("=" * 84)
 
     # Return non-zero if any scenario failed, so this can be wired into CI later
-    return 0 if passed == len(cases) else 1
+    return 0 if (passed == len(cases) and side_passed == len(side_cases)) else 1
 
 
 if __name__ == "__main__":
