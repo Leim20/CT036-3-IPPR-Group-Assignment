@@ -114,6 +114,14 @@ def process_image_array(image, material=None, detectors=None):
         img_plain=img_plain,
         material=material,
     )
+    # Teammate detectors already provide their pixel masks. The three detectors
+    # that retain the assignment's legacy tuple return contract receive their
+    # reconstructed segmentation masks here, so every downstream display and
+    # metric uses the same pixel-level representation.
+    for defect, region_mask in zip(defects, segmented_regions):
+        if hasattr(defect, "mask") and defect.mask is None:
+            defect.mask = region_mask
+
     defect_mask = np.zeros(mask_filled.shape, dtype=np.uint8)
     for region_mask in segmented_regions:
         defect_mask = cv2.bitwise_or(defect_mask, region_mask)
@@ -129,9 +137,7 @@ def process_image_array(image, material=None, detectors=None):
                 "glove_area_ratio": area_ratio,
                 "defect_count": len(defects),
             },
-            "result_image": draw_results(
-                img_plain, defects, segmented_regions
-            ),
+            "result_image": draw_results(img_plain, defects),
             "errors": errors,
             "status_message": "defect detected" if defects else "no defects detected",
         }

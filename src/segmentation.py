@@ -1,40 +1,51 @@
 # -*- coding: utf-8 -*-
 """
-Glove segmentation: cut the glove out of the background and produce a
-black-and-white mask (white = glove, black = background).
+Glove segmentation: separate the glove from the background and return a
+binary mask (white = glove, black = background).
 
-Approach: sample the colour along the four image borders as a "background
-reference colour", compute each pixel's colour distance from it, and use
-Otsu's automatic threshold to find the cut-off.
+Approach: sample the colour of the four image borders as a "background
+reference colour", measure how far every pixel is from it, and let Otsu
+pick the cut-off automatically.
 
-Why the background colour is used as the reference instead of a patch at
-the centre of the frame:
-  - the glove isn't always centred, so a centre patch is an easy way to
-    grab the wrong reference colour
-  - more importantly, it's a logical problem: if the "glove colour" were
-    used as the reference, segmentation would exclude any pixel that
-    doesn't look like the glove -- and a stain is exactly that kind of
-    pixel, so the stain detector could never find it, and it would
-    instead get misreported by the hole detector as a "hole" (wrong
-    defect type)
-  Using the background colour as the reference fixes both problems at
-  once: a stain "isn't the background colour" so it stays in the mask,
-  and a hole "reveals exactly the background colour" so only genuine
-  holes become hole candidates.
+Why the background colour is the reference, and not a centre patch taken
+as the "glove colour":
+  - the glove is not necessarily centred, so a centre patch easily picks
+    up the wrong reference colour;
+  - more importantly it is logically wrong: with a "glove colour"
+    reference, segmentation throws away every pixel that does not look
+    like the glove -- and a stain is exactly such a pixel. The stain
+    detector would then never see it, while the hole detector would
+    report it as a "hole" (wrong defect type).
+  With a background reference, a stain stays inside the mask because it
+  "is not the background colour", and a hole becomes a hole candidate
+  because what shows through it *is* the background colour. Both problems
+  disappear on their own, with no special-casing.
 """
 import cv2
 import numpy as np
 
-BORDER_RATIO = 0.06                          # width of the border strip sampled as background
-MIN_AREA_RATIO, MAX_AREA_RATIO = 0.05, 0.95  # plausible range for the glove's area fraction
-CLOSE_KSIZE = 7   # morphology closing kernel: fills small gaps, larger is fine
-OPEN_KSIZE = 3    # morphology opening kernel: removes noise, must stay small --
-                  # 7 erodes away thin tears too (found through testing)
+BORDER_RATIO = 0.06                          # how wide a border strip to sample
+MIN_AREA_RATIO, MAX_AREA_RATIO = 0.05, 0.95  # plausible range for the glove area
+CLOSE_KSIZE = 7   # closing kernel: fills gaps, being generous is fine
+OPEN_KSIZE = 3    # opening kernel: removes speckles, must stay small -- at 7 it
+                  # also wipes out the thin sliver of a tear (found the hard way)
+
+# Once the 90th percentile of the chroma difference reaches this, segment on the
+# a/b chroma alone and ignore lightness L.
+# Why there are two modes:
+#   With a coloured background (say a yellow mat) and a white glove, lightness
+#   is a liability -- shadows on the mat differ strongly in brightness and get
+#   taken for glove, while a real stain sits close to the material in lightness
+#   and falls under the threshold. Measured on 4 white-cotton photos, switching
+#   to pure chroma raised stain coverage inside the mask from 2-3/4 to 4/4.
+#   But a grey glove on a grey-white background is near-neutral in chroma on
+#   both sides and can only be told apart by lightness, so there we have to
+#   fall back to the full Lab distance.
+CHROMA_SEG_MIN_SPREAD = 12.0
 
 
 def get_background_color(img):
-    """Median colour (Lab space) of the pixels along the four image
-    borders -- used as the background reference."""
+    """Median colour (in Lab) of the four image borders: the background reference."""
     lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB).astype(np.float32)
     h, w = lab.shape[:2]
     bh, bw = max(int(h * BORDER_RATIO), 1), max(int(w * BORDER_RATIO), 1)
@@ -47,19 +58,24 @@ def get_background_color(img):
 
 def segment_glove(img):
     """Return (mask_filled, mask_raw):
-    - mask_raw   : the glove's actual pixels (holes are black, since a
-                   hole reveals the background)
-    - mask_filled: the glove's full outline filled in (holes are filled
-                   white too)
-    Subtracting the two = "inside the outline, but coloured like the
+    - mask_raw   : the glove's actual pixels (a hole is black there, because
+                   what shows through a hole is the background)
+    - mask_filled: the glove's outline filled in solid (holes turn white too)
+    The difference between them = "inside the outline but coloured like the
     background" -> hole candidates.
     """
     bg_color = get_background_color(img)
     lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB).astype(np.float32)
 
-    # each pixel's distance from the background colour, Otsu finds "how
-    # far counts as glove" automatically
-    dist = np.linalg.norm(lab - bg_color, axis=2)
+    # Distance from every pixel to the background colour; Otsu decides how far
+    # "far enough to be glove" is. When the background itself has a clear hue we
+    # compare chroma only, so brightness differences from shadows and highlights
+    # cannot interfere (see the note above).
+    chroma = np.hypot(lab[:, :, 1] - bg_color[1], lab[:, :, 2] - bg_color[2])
+    if float(np.percentile(chroma, 90)) >= CHROMA_SEG_MIN_SPREAD:
+        dist = chroma
+    else:
+        dist = np.linalg.norm(lab - bg_color, axis=2)
     dist_u8 = cv2.normalize(dist, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
     _, mask = cv2.threshold(dist_u8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
@@ -68,7 +84,7 @@ def segment_glove(img):
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_k)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, open_k)
 
-    # keep only the largest connected region, and fill it in
+    # Keep only the largest connected region and fill its interior
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     mask_filled = np.zeros_like(mask)
     if contours:
@@ -80,16 +96,17 @@ def segment_glove(img):
 
 
 def glove_found(mask_filled):
-    """Whether the glove's area fraction falls in a plausible range; if
-    not, this image doesn't contain a glove. Returns (found, area ratio)."""
+    """Whether the glove's area fraction is plausible; if it is not, no glove
+    was found in this image. Returns (found, area_fraction).
+    """
     ratio = float(mask_filled.mean() / 255)
     return MIN_AREA_RATIO < ratio < MAX_AREA_RATIO, ratio
 
 
 def get_glove_color(img, mask_raw):
-    """Reference colour for the glove's normal appearance (Lab median).
-    Erode the mask inward first, to avoid the mixed glove/background
-    pixels along the edge. Returns None if no glove pixels are found.
+    """Reference colour of the undamaged glove material (median in Lab). The
+    mask is eroded inwards first, to avoid the rim of pixels where glove and
+    background colours blend. Returns None when no glove pixels are found.
     """
     lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB).astype(np.float32)
     inner = cv2.erode(mask_raw, np.ones((9, 9), np.uint8)) > 0

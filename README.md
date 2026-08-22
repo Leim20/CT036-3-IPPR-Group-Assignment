@@ -28,12 +28,14 @@ python -m venv .venv                      # create an isolated Python environmen
 .venv\Scripts\python src\gui.py
 ```
 
-First place the test photos under `dataset/raw/<material>/<defect>/`. Once the
+First place test photos directly under `dataset/raw/`, or in any subfolders;
+the dropdown scans recursively. Once the
 window opens, choose a photo from **Test Image**, select one defect or
 `All Defects` under **Defect / Detection Mode**, then click **Run Detection**.
 The original image appears as soon as it is selected; the result panel shows
-red bounding boxes and defect labels, while the summary lists the status,
-detection mode and candidate-region coordinates.
+fixed-colour pixel overlays, contours, boxes and defect labels. Below it the
+GUI reports affected-area percentage, rule evidence and processing time. Use
+**Save Result** to export the full-resolution annotated image.
 
 ## Project structure (what each file does)
 
@@ -57,20 +59,20 @@ Pipeline: `image -> (1) preprocess (denoise + illumination normalisation) -> (2)
 .venv\Scripts\python src\selftest.py
 ```
 
-Runs 35 simulated scenarios (low/bright light, side lighting, noise,
-background colour changes, glove offsets, off-colour stains, open tears,
+Runs 36 simulated scenarios (low/bright light, side lighting, noise,
+background colour changes, glove offsets, off-colour stains, a clean two-tone material, open tears,
 fingertip tears, multiple simultaneous defects, blank background with no
 glove, plus a **4 materials x 4 lighting conditions** matrix), compares
 each against the expected result, and prints a pass rate. **Run this every
 time the algorithms change** -- a failing run exits non-zero.
-Currently: 35/35 passing.
+Currently: 36/36 passing.
 
 At the bottom it also prints a separate **"known limitations"** list (not
-counted in the pass rate). There are currently 4 entries, all related to
-"side lighting" -- segmentation relies on a single global background
-reference colour plus a global Otsu threshold, which fails when the
-background itself has a strong brightness gradient, especially with dark
-gloves. **These are not gaps in test coverage, they are known unfixed
+counted in the pass rate). The 2 combinations still failing both involve
+side lighting with a dark glove -- segmentation relies on a single global
+background reference colour plus a global Otsu threshold, which fails when
+the background itself has a strong brightness gradient. **These are not gaps
+in test coverage, they are known unfixed
 issues** -- write them up in the report's critical analysis.
 
 > Caution: synthetic images only validate algorithm logic, they don't
@@ -202,8 +204,10 @@ Classical techniques you can draw on per defect:
   shape criteria (already implemented; note that a normal finger gap is
   also a deep notch, distinguished by "mouth width / depth ratio" and
   "apex angle")
-- Stain/spot/discolouration -> Lab colour distance + excluding the
-  background colour + area filtering (already implemented)
+- Stain -> material-adaptive rules: rebuild light-glove material, compare Lab
+  chroma against both material and background, then reject sparse knit holes
+  and thin edges by density/compactness; coloured gloves use dominant-hue
+  deviation with local Lab only as a fallback (implemented)
 - Missing/incomplete finger -> convexity defects, count the fingers
 - Wrinkle/dent -> edge density (Canny) or texture features (GLCM/LBP)
   within the glove region

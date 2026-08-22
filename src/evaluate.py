@@ -1,19 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-Batch evaluation script -- runs the full dataset and tallies detected /
-missed / false-positive counts for every defect type:
+Batch evaluation -- run the whole dataset and count hits, misses and false
+alarms for every defect type:
 
     .venv\\Scripts\\python src\\evaluate.py
     .venv\\Scripts\\python src\\evaluate.py --save-failures   (also saves the failing images)
 
-Maps onto these assignment requirements:
-  Sec 4 "test the system to evaluate the accuracy of the proposed techniques"
-  Sec 5 "describe the results of testing using various test images"
-  Sec 5 "critical analysis for cases of images that fail"
-  Sec 6 Experimental Results & Critical analysis = 40% of the marks
+Covers these assignment requirements:
+  S4 "test the system to evaluate the accuracy of the proposed techniques"
+  S5 "describe the results of testing using various test images"
+  S5 "critical analysis for cases of images that fail"
+  S6 Experimental Results & Critical analysis = 40% of the marks
 
-===== Dataset layout (the ground truth comes from folder names, no manual
-bounding-box annotation needed) =====
+===== How to lay out the dataset =====
+(ground truth comes from the folder names, so no boxes have to be drawn by hand)
 
     dataset/raw/
       hole/                  <- defect name
@@ -32,8 +32,8 @@ bounding-box annotation needed) =====
 Multiple labels can be joined with "+", for example
 ``hole+thin/cotton/example.jpg``.
 
-The folder-name -> defect-label lookup table is LABEL_MAP below.
-Whenever a team member adds a new detector, add a matching row to it.
+The folder-name to defect-name table is LABEL_MAP below.
+When you add a new detector, remember to add a line to LABEL_MAP.
 """
 import argparse
 import csv
@@ -47,9 +47,8 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from pipeline import process_image
 
-# folder name (lowercase) -> the defect label a detector actually returns
-# The left side can be whatever you like; the right side MUST exactly
-# match the string returned by the detector.
+# folder name (lower-case) -> the defect name the detector returns
+# The left side is up to you; the right side must match the detector exactly.
 LABEL_MAP = {
     "hole": "Hole",
     "puncture": "Hole",
@@ -63,7 +62,16 @@ LABEL_MAP = {
     "thin": "Thin / Overstretched",
     "overstretched": "Thin / Overstretched",
     "thin_overstretched": "Thin / Overstretched",
-    # add new detectors here as team members finish them, e.g. "wrinkle": "Wrinkle",
+    "spotting": "Spotting",
+    "spots": "Spotting",
+    # every spelling is accepted, so a differently written folder name
+    # cannot silently skip a whole defect class
+    "plastic": "Plastic Contamination",
+    "plasticcontamination": "Plastic Contamination",
+    "plastic contamination": "Plastic Contamination",
+    "plastic_contamination": "Plastic Contamination",
+    # add new detectors here as team members finish them,
+    # e.g. "wrinkle": "Wrinkle",
 }
 
 GOOD_DIR_NAMES = {"good", "ok", "normal", "pass"}   # folder names that mean "clean glove"
@@ -71,8 +79,7 @@ IMG_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
 
 
 def parse_expected(folder_name):
-    """folder name -> the set of expected defect labels. Returns an empty
-    set for a "good/clean" folder."""
+    """Folder name -> the set of defect names expected. Empty set for good ones."""
     name = folder_name.strip().lower()
     if name in GOOD_DIR_NAMES:
         return set()
@@ -82,12 +89,12 @@ def parse_expected(folder_name):
         if part in LABEL_MAP:
             labels.add(LABEL_MAP[part])
         else:
-            labels.add(f"<unregistered:{part}>")   # a reminder to add this to LABEL_MAP
+            labels.add(f"<unregistered:{part}>")   # reminder to extend LABEL_MAP
     return labels
 
 
 def collect_images(root):
-    """Scan dataset/raw and return [(image path, material, expected defect set), ...]."""
+    """Scan dataset/raw and return [(image path, material, expected defects), ...]"""
     items = []
     if not os.path.isdir(root):
         return items
@@ -110,15 +117,15 @@ def evaluate(root, save_failures=False):
     items = collect_images(root)
     if not items:
         print(f"No images found under {root}.")
-        print(__doc__.split("===== Dataset layout")[1])
+        print(__doc__.split("===== How to lay out the dataset")[1])
         return 1
 
     # counters
     stat = defaultdict(lambda: {"tp": 0, "fn": 0, "fp": 0})   # per defect type
-    mat_stat = defaultdict(lambda: {"hit": 0, "need": 0})     # per-material recall
-    rows = []                       # rows written to the CSV
-    failures = []                   # failing images, for the report's failure-case analysis
-    detector_errors = defaultdict(int)   # which detector failed, and how many times
+    mat_stat = defaultdict(lambda: {"hit": 0, "need": 0})     # recall per material
+    rows = []                       # per-image records written to the CSV
+    failures = []                   # failing images, for the failure analysis
+    detector_errors = defaultdict(int)   # which detector crashed, and how often
     n_good = n_good_fp = n_noglove = 0
 
     fail_dir = os.path.join(os.path.dirname(root), "failures")
@@ -136,15 +143,15 @@ def evaluate(root, save_failures=False):
             n_noglove += 1
             detected = set()
             defects = []
-            verdict = "segmentation failed (no glove detected)"
+            verdict = "segmentation failed (no glove found)"
             failures.append((path, verdict))
         else:
             defects = result["defects"]
             errs = result["errors"]
             detected = {n for n, _ in defects}
             verdict = "correct" if detected == expected else "mismatch"
-            # a detector crashing is a code bug, not an accuracy issue --
-            # it must be flagged separately
+            # A crashing detector is a code bug, not an accuracy problem, so
+            # it has to be reported separately.
             for err in errs:
                 detector_errors[err.split(":")[0]] += 1
 
@@ -157,13 +164,13 @@ def evaluate(root, save_failures=False):
         for label in detected - expected:
             stat[label]["fp"] += 1
 
-        # --- per-material (whether this image's defects were all detected) ---
+        # --- per material (did all of this image's defects get found?) ---
         if expected:
             mat_stat[material]["need"] += 1
             if expected <= detected:
                 mat_stat[material]["hit"] += 1
 
-        # --- false positives on clean gloves ---
+        # --- false alarms on defect-free images ---
         if not expected:
             n_good += 1
             if detected:
@@ -180,71 +187,71 @@ def evaluate(root, save_failures=False):
                      "|".join(sorted(detected)), verdict])
 
     # ================= print the results =================
-    print("=" * 84)
-    print(f"Dataset: {root}    {len(items)} image(s) total")
-    print("-" * 84)
-    print(f"{'Defect Type':<20}{'Total':>8}{'TP':>7}{'FN':>7}{'FP':>7}"
-          f"{'Recall':>9}{'Precision':>11}{'F1':>8}")
-    print("-" * 84)
+    print("=" * 78)
+    print(f"Dataset: {root}    {len(items)} images")
+    print("-" * 78)
+    print(f"{'Defect type':<24}{'expected':>9}{'found':>7}{'missed':>8}"
+          f"{'false':>7}{'recall':>9}{'precision':>11}{'F1':>7}")
+    print("-" * 78)
     for label in sorted(stat):
         s = stat[label]
         tp, fn, fp = s["tp"], s["fn"], s["fp"]
         recall = tp / (tp + fn) if tp + fn else 0.0
         prec = tp / (tp + fp) if tp + fp else 0.0
         f1 = 2 * prec * recall / (prec + recall) if prec + recall else 0.0
-        print(f"{label:<20}{tp+fn:>8}{tp:>7}{fn:>7}{fp:>7}"
-              f"{recall:>9.1%}{prec:>11.1%}{f1:>8.2f}")
+        print(f"{label:<24}{tp+fn:>9}{tp:>7}{fn:>8}{fp:>7}"
+              f"{recall:>9.1%}{prec:>11.1%}{f1:>7.2f}")
 
-    print("-" * 84)
+    print("-" * 78)
     if mat_stat:
-        print("By material (were all of this image's defects detected):")
+        print("By material (were all of this image's defects found?):")
         for m in sorted(mat_stat):
             v = mat_stat[m]
             if v["need"]:
                 print(f"  {m:<16}{v['hit']}/{v['need']}   {v['hit']/v['need']:.1%}")
             else:
-                print(f"  {m:<16}(no defective images)")
+                print(f"  {m:<16}(no images with defects)")
     if n_good:
-        print(f"False-positive rate on clean gloves: {n_good_fp}/{n_good} = {n_good_fp/n_good:.1%}")
+        print(f"False alarms on good gloves : {n_good_fp}/{n_good} = {n_good_fp/n_good:.1%}")
     if n_noglove:
-        print(f"Segmentation failures (no glove detected): {n_noglove} image(s)")
+        print(f"Segmentation failed (no glove found) : {n_noglove} images")
     if detector_errors:
-        print("-" * 84)
-        print("Detector(s) raised runtime errors (this is a code bug -- fix it "
-             "before trusting the accuracy numbers above):")
+        print("-" * 78)
+        print("! A detector crashed -- that is a code bug, fix it before "
+              "trusting the numbers above:")
         for name, count in sorted(detector_errors.items(), key=lambda kv: -kv[1]):
-            print(f"    {name}  failed {count} time(s)")
+            print(f"    {name}  failed {count} times")
 
-    # ================= failure case list (for the report) =================
+    # ============= list of failures (used by the report) =============
     if failures:
-        print("-" * 84)
-        print(f"{len(failures)} failure case(s) (use these for the report's critical analysis):")
+        print("-" * 78)
+        print(f"{len(failures)} failing images -- these are the critical analysis:")
         for path, why in failures[:15]:
             print(f"  {os.path.relpath(path, root)}  ->  {why}")
         if len(failures) > 15:
-            print(f"  ... {len(failures)-15} more, see the CSV")
+            print(f"  ... the remaining {len(failures)-15} are in the CSV")
 
     # ================= write the CSV =================
     csv_path = os.path.join(os.path.dirname(root), "evaluation_result.csv")
     with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
-        w.writerow(["Image", "Material", "Expected Defects", "Detected Defects", "Verdict"])
+        w.writerow(["image", "material", "expected", "detected", "verdict"])
         w.writerows(rows)
-    print("-" * 84)
-    print(f"Per-image results saved to: {csv_path}")
+    print("-" * 78)
+    print(f"Per-image results saved to : {csv_path}")
     if save_failures:
-        print(f"Annotated failure images saved to: {fail_dir}")
-    print("=" * 84)
+        print(f"Annotated failures saved to : {fail_dir}")
+    print("=" * 78)
     return 0
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Glove Defect Detection system -- batch evaluation")
+    ap = argparse.ArgumentParser(description="Glove defect detection -- batch evaluation")
     default_root = os.path.join(os.path.dirname(__file__), "..", "dataset", "raw")
     ap.add_argument("dataset", nargs="?", default=os.path.abspath(default_root),
                     help="dataset root directory (default: dataset/raw)")
     ap.add_argument("--save-failures", action="store_true",
-                    help="also save annotated failing images to dataset/failures/")
+                    help="save failing images with their boxes into dataset/failures/")
     args = ap.parse_args()
     return evaluate(args.dataset, args.save_failures)
 

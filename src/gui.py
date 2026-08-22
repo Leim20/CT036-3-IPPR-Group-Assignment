@@ -9,15 +9,21 @@ it immediately. The user can then run one detector for a focused test, or run
 all registered detectors for a complete inspection.
 """
 from pathlib import Path
+import re
+import time
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 import cv2
 from PIL import Image, ImageTk
 
 from preprocessing import preprocess
-from defect_detection import DETECTORS
-from pipeline import read_image, process_image_array
+from defect_detection import (
+    DETECTORS,
+    affected_area_percentage,
+    overall_evidence_score,
+)
+from pipeline import process_image_array, read_image
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -61,7 +67,8 @@ DETECTOR_LABELS = {
     "detect_missing_finger": "Finger Not Enough",  # legacy function-name alias
     "detect_fused_fingers": "Fused Fingers",
     "detect_discoloration": "Discoloration",
-    "detect_oversize": "Oversize",
+    "detect_plastic_contamination": "Plastic Contamination",
+    "detect_spotting": "Spotting",
     "detect_thin_area": "Thin",
     "detect_wrinkles": "Wrinkles/Dent",
 }
@@ -108,12 +115,16 @@ class GloveDefectApp:
         self.img_source = None
         self.img_plain = None
         self.selected_image_path = None
+        self.annotated_result = None
         self.image_paths = {}
         self.detector_by_label = {_label_for(det): det for det in DETECTORS}
 
         self.image_var = tk.StringVar(value=IMAGE_PLACEHOLDER)
         self.detector_var = tk.StringVar(value=DETECTOR_PLACEHOLDER)
         self.image_count_var = tk.StringVar()
+        self.affected_area_var = tk.StringVar(value="Affected area: —")
+        self.evidence_var = tk.StringVar(value="Rule evidence: —")
+        self.processing_time_var = tk.StringVar(value="Processing time: —")
         available = len(set(DEFECT_OPTIONS) & set(self.detector_by_label))
         self.detector_count_var = tk.StringVar(
             value=f"{available} of {len(DEFECT_OPTIONS)} detectors available"
@@ -170,13 +181,26 @@ class GloveDefectApp:
         )
         self.detector_combo.bind("<<ComboboxSelected>>", self.on_detector_selected)
 
+        action_buttons = ttk.Frame(controls)
+        action_buttons.grid(row=1, column=2, sticky="ew", pady=(3, 0))
+        action_buttons.columnconfigure(0, weight=1)
+        action_buttons.columnconfigure(1, weight=1)
+
         self.run_button = ttk.Button(
-            controls,
+            action_buttons,
             text="Run Detection",
             command=self.detect,
             state=tk.DISABLED,
         )
-        self.run_button.grid(row=1, column=2, sticky="ew", pady=(3, 0))
+        self.run_button.grid(row=0, column=0, sticky="ew", padx=(0, 5))
+
+        self.save_button = ttk.Button(
+            action_buttons,
+            text="Save Result",
+            command=self.save_result,
+            state=tk.DISABLED,
+        )
+        self.save_button.grid(row=0, column=1, sticky="ew", padx=(5, 0))
 
         ttk.Label(
             controls,
@@ -222,8 +246,38 @@ class GloveDefectApp:
         )
         self.panel_right.pack(fill=tk.BOTH, expand=True)
 
+        metrics = ttk.Frame(container, padding=(2, 0))
+        metrics.pack(fill=tk.X, pady=(9, 0))
+        metrics.columnconfigure(0, weight=1)
+        metrics.columnconfigure(2, weight=1)
+        metrics.columnconfigure(4, weight=1)
+        metric_font = ("Segoe UI", 10, "bold")
+        ttk.Label(metrics, textvariable=self.affected_area_var, font=metric_font).grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Separator(metrics, orient=tk.VERTICAL).grid(
+            row=0, column=1, sticky="ns", padx=12
+        )
+        ttk.Label(metrics, textvariable=self.evidence_var, font=metric_font).grid(
+            row=0, column=2, sticky="w"
+        )
+        ttk.Separator(metrics, orient=tk.VERTICAL).grid(
+            row=0, column=3, sticky="ns", padx=12
+        )
+        ttk.Label(metrics, textvariable=self.processing_time_var, font=metric_font).grid(
+            row=0, column=4, sticky="w"
+        )
+        ttk.Label(
+            metrics,
+            text=(
+                "Colour key: Hole = red   Finger Not Enough = orange   "
+                "Thin = magenta   Stain = orange   Spotting = yellow   Plastic = cyan"
+            ),
+            foreground="#4b5563",
+        ).grid(row=1, column=0, columnspan=5, sticky="w", pady=(4, 0))
+
         summary = ttk.LabelFrame(container, text="Detection Summary", padding=8)
-        summary.pack(fill=tk.X, pady=(10, 0))
+        summary.pack(fill=tk.X, pady=(8, 0))
 
         self.result_box = tk.Text(
             summary,
@@ -262,7 +316,7 @@ class GloveDefectApp:
             self.img_source = None
             self.img_plain = None
             self._clear_panel(self.panel_left, "Select a dataset image above")
-            self._clear_panel(self.panel_right, "Run detection to view the result")
+            self._reset_detection_result()
             self._show_ready_message()
         self._update_run_button()
 
@@ -286,13 +340,13 @@ class GloveDefectApp:
         self.img_source = img
         _, self.img_plain = preprocess(img)
         self.show_on_panel(self.panel_left, self.img_plain)
-        self._clear_panel(self.panel_right, "Run detection to view the result")
+        self._reset_detection_result()
         self._show_ready_message()
         self._update_run_button()
 
     def on_detector_selected(self, _event=None):
         if self.img_plain is not None:
-            self._clear_panel(self.panel_right, "Run detection to view the result")
+            self._reset_detection_result()
         self._show_ready_message()
         self._update_run_button()
 
@@ -344,6 +398,16 @@ class GloveDefectApp:
         panel.configure(image="", text=text, width=60, height=20)
         panel.image = None
 
+    def _reset_detection_result(self):
+        """Clear the previous result, so switching image or detector cannot save
+        last run's annotated picture by mistake."""
+        self.annotated_result = None
+        self.save_button.configure(state=tk.DISABLED)
+        self.affected_area_var.set("Affected area: —")
+        self.evidence_var.set("Rule evidence: —")
+        self.processing_time_var.set("Processing time: —")
+        self._clear_panel(self.panel_right, "Run detection to view the result")
+
     def show_on_panel(self, panel, img_bgr):
         h, w = img_bgr.shape[:2]
         scale = min(PANEL_W / w, PANEL_H / h)
@@ -354,6 +418,50 @@ class GloveDefectApp:
         photo = ImageTk.PhotoImage(Image.fromarray(img_rgb))
         panel.configure(image=photo, text="", width=display_w, height=display_h)
         panel.image = photo
+
+    def save_result(self):
+        """Let the user save the full-resolution annotated image on the right
+        as a PNG or JPEG."""
+        if self.annotated_result is None or self.selected_image_path is None:
+            messagebox.showwarning(
+                "No Result", "Run detection before saving an annotated result."
+            )
+            return
+
+        output_dir = PROJECT_ROOT / "results"
+        output_dir.mkdir(exist_ok=True)
+        mode = re.sub(r"[^A-Za-z0-9]+", "_", self.detector_var.get()).strip("_")
+        default_name = f"{self.selected_image_path.stem}_{mode or 'detection'}_annotated.png"
+        chosen = filedialog.asksaveasfilename(
+            title="Save Annotated Detection Result",
+            initialdir=str(output_dir),
+            initialfile=default_name,
+            defaultextension=".png",
+            filetypes=[
+                ("PNG image", "*.png"),
+                ("JPEG image", "*.jpg *.jpeg"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not chosen:
+            return
+
+        path = Path(chosen)
+        extension = path.suffix.lower()
+        if extension not in {".png", ".jpg", ".jpeg"}:
+            path = path.with_suffix(".png")
+            extension = ".png"
+        params = [cv2.IMWRITE_JPEG_QUALITY, 95] if extension in {".jpg", ".jpeg"} else []
+        success, encoded = cv2.imencode(extension, self.annotated_result, params)
+        if not success:
+            messagebox.showerror("Save Error", "The annotated image could not be encoded.")
+            return
+        try:
+            encoded.tofile(str(path))
+        except OSError as exc:
+            messagebox.showerror("Save Error", f"Cannot save the result:\n{exc}")
+            return
+        messagebox.showinfo("Result Saved", f"Annotated result saved to:\n{path}")
 
     def say(self, text):
         self.result_box.configure(state=tk.NORMAL)
@@ -383,6 +491,7 @@ class GloveDefectApp:
         try:
             self._detect(detectors)
         except Exception as exc:
+            self._reset_detection_result()
             self._clear_panel(self.panel_right, "Detection could not be completed")
             self.say(
                 "Status: ERROR\n"
@@ -395,16 +504,21 @@ class GloveDefectApp:
             self._update_run_button()
 
     def _detect(self, detectors):
-        material = Path(self.selected_image_path).parent.name
+        started = time.perf_counter()
+        material = self.selected_image_path.parent.name
         result = process_image_array(
             self.img_source,
             material=material,
             detectors=detectors,
         )
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
         ratio = result["features"]["glove_area_ratio"]
 
         if not result["glove_found"]:
-            self.show_on_panel(self.panel_right, self.img_plain)
+            result_img = result["result_image"]
+            if result_img is not None:
+                self.show_on_panel(self.panel_right, result_img)
+            self.processing_time_var.set(f"Processing time: {elapsed_ms:.1f} ms")
             self.say(
                 "Status: NO GLOVE DETECTED\n"
                 f"Selected image: {self.image_var.get()}\n"
@@ -416,7 +530,20 @@ class GloveDefectApp:
 
         defects = result["defects"]
         errors = result["errors"]
-        self.show_on_panel(self.panel_right, result["result_image"])
+        mask_filled = result["glove_mask"]
+        result_img = result["result_image"]
+        affected_pct = affected_area_percentage(defects, mask_filled)
+        evidence_score = overall_evidence_score(defects, result_img.shape)
+
+        self.annotated_result = result_img.copy()
+        self.save_button.configure(state=tk.NORMAL)
+        self.affected_area_var.set(f"Affected area: {affected_pct:.2f}%")
+        self.evidence_var.set(
+            f"Rule evidence: {evidence_score:.1f}/100" if defects
+            else "Rule evidence: Not applicable"
+        )
+        self.processing_time_var.set(f"Processing time: {elapsed_ms:.1f} ms")
+        self.show_on_panel(self.panel_right, result_img)
 
         mode = self.detector_var.get()
         if defects:
@@ -431,14 +558,26 @@ class GloveDefectApp:
                 f"Selected image: {self.image_var.get()}",
                 f"Detection mode: {mode}",
                 f"Detected regions: {len(defects)}",
+                f"Affected area: {affected_pct:.2f}% of glove",
+                (
+                    f"Rule evidence score: {evidence_score:.1f}/100 "
+                    "(rule strength, not probability)"
+                    if defects else "Rule evidence score: Not applicable"
+                ),
+                f"Processing time: {elapsed_ms:.1f} ms",
                 "",
             ]
         )
 
         if defects:
-            for index, (name, (x, y, w, h)) in enumerate(defects, 1):
+            for index, defect in enumerate(defects, 1):
+                name, (x, y, w, h) = defect
+                region_pct = affected_area_percentage([defect], mask_filled)
+                region_evidence = getattr(defect, "evidence", 0.0)
                 lines.append(
-                    f"{index}. {name} - x={x}, y={y}, width={w}, height={h}"
+                    f"{index}. {name} | affected={region_pct:.2f}% | "
+                    f"evidence={region_evidence:.1f}/100 | "
+                    f"box x={x}, y={y}, w={w}, h={h}"
                 )
         elif mode != ALL_DETECTORS_LABEL:
             lines.append(
