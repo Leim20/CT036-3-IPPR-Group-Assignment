@@ -40,7 +40,7 @@ processing and are not recommended:
 
 | Family | Defect (Figure 1 naming) | Core algorithm | Difficulty | Status | Suggested owner |
 |---|---|---|---|---|---|
-| 1. Mask subtraction + background-colour check | Hole | `mask_filled - mask_raw`, candidate region's average colour approx equal to the background colour | Easy | Done: `detect_holes` | **Member A** |
+| 1. Mask subtraction + background-colour check | Tearing (enclosed rupture) | `mask_filled - mask_raw`, candidate region's average colour approx equal to the background colour | Easy | Done: `detect_tearing` | **Member A** |
 | 2. Convexity defects (narrow + sharp) | Tearing / Open Tear | convexity defects, mouth-width/depth ratio < 0.45 and apex angle < 24 deg | Medium | Done: `detect_open_tears` | **Member A** |
 | 2. Convexity defects (narrow + sharp, restricted to the fingertip region) | Tearing (fingertip) | same algorithm + a position test ("the notch apex sits in the glove's top quarter") | Medium | Covered by the regression suite | **Member A** |
 | 3. Convexity-defect counting (peaks) | Finger Not Enough / Missing Finger | count convex-hull peaks (fingertips); report if != 5 | Medium | Not started | **Member B** |
@@ -62,7 +62,7 @@ satisfying the assignment's hard requirement.
 
 ## Known implementation pitfalls (read before starting, so you don't rediscover them the hard way)
 
-- **Family 1, Hole**: segmentation fails under "strong side lighting +
+- **Family 1, Tearing (enclosed rupture)**: segmentation fails under "strong side lighting +
   dark glove" (reproducible via the "known limitations" list at the
   bottom of `selftest.py`). This is a segmentation-layer problem, not an
   issue with the hole detector itself.
@@ -97,11 +97,13 @@ satisfying the assignment's hard requirement.
   exist in `dataset/raw/<material>/good/` -- synthetic images can't
   produce trustworthy numbers here.
 
-## Hole and open-tear naming
+## Tearing detector naming
 
-`detect_holes` outputs **`"Hole"`**. Tearing is a separate defect and is
-output as `"Open Tear"` by `detect_open_tears`, so the GUI, evaluator and
-dataset labels do not combine the two classes.
+`detect_tearing` finds enclosed openings and outputs the assignment-compliant
+label **`"Tearing"`**.
+`detect_open_tears` outputs `"Open Tear"` for boundary-reaching tears. The
+legacy `dataset/raw/hole/` folder remains supported by the evaluator and maps
+to `"Tearing"`.
 
 ---
 

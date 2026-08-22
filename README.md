@@ -133,7 +133,7 @@ images that fail" -- i.e. the 40%-of-marks section.
 ## Team division of labour (3 defects per person, 12 total across the group)
 
 1. In `defect_detection.py`, model your detector function after
-   `detect_holes` / `detect_stains`. **The signature must follow this
+   `detect_tearing` / `detect_stains`. **The signature must follow this
    shape:**
 
 ```python
@@ -170,7 +170,7 @@ For the glove's normal colour, call
 > wrinkle).
 
 `defect_detection.py` already has the tunable threshold constants at the
-top; follow the pattern in `detect_holes` / `detect_stains` rather than
+top; follow the pattern in `detect_tearing` / `detect_stains` rather than
 writing a separate helper module.
 
 ### A crashing detector won't take the rest of the system down with it

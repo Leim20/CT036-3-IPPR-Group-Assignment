@@ -21,7 +21,7 @@ class DefectSegmentationTests(unittest.TestCase):
     def background_lab(image):
         return cv2.cvtColor(image, cv2.COLOR_BGR2LAB).astype(np.float32)[0, 0]
 
-    def test_hole_mask_colours_only_the_opening(self):
+    def test_tearing_mask_colours_only_the_opening(self):
         image = np.full((400, 400, 3), self.BACKGROUND, np.uint8)
         glove = np.zeros((400, 400), np.uint8)
         cv2.rectangle(glove, (50, 50), (350, 350), 255, cv2.FILLED)
@@ -33,7 +33,7 @@ class DefectSegmentationTests(unittest.TestCase):
             glove,
             glove,
             self.background_lab(image),
-            [("Hole", (178, 178, 45, 45))],
+            [("Tearing", (178, 178, 45, 45))],
             img_plain=image,
             material="nitrile",
         )
@@ -126,7 +126,7 @@ class DefectSegmentationTests(unittest.TestCase):
         cv2.circle(mask, (50, 50), 10, 255, cv2.FILLED)
         result = draw_results(
             image,
-            [("Hole", (40, 40, 21, 21))],
+            [("Tearing", (40, 40, 21, 21))],
             [mask],
         )
 

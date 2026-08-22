@@ -37,7 +37,7 @@ GLOVE = (190, 120, 40)   # glove colour (BGR, blue)
 BG = (60, 60, 200)       # background colour (BGR, red)
 
 
-def make_glove_image(stain_color=(100, 60, 20), hole=True, stain=True,
+def make_glove_image(stain_color=(100, 60, 20), tearing=True, stain=True,
                      bright=1.0, offset=(0, 0), bg=BG, glove=GLOVE,
                      noise=0, side_light=False,
                      open_tear=False, fingertip_tear=False, two_tone=False,
@@ -72,12 +72,12 @@ def make_glove_image(stain_color=(100, 60, 20), hole=True, stain=True,
         cv2.rectangle(img, (330 + ox, 475 + oy), (470 + ox, 560 + oy),
                       cuff_color, -1)
 
-    if hole:   # defect 1: closed hole (the background shows through)
+    if tearing:   # defect 1: enclosed tearing (the background shows through)
         cv2.circle(img, (430 + ox, 330 + oy), 22, bg, -1)
     if open_tear:   # defect 2a: open tear in the side of the palm (from the left edge inwards)
-        # Note it is drawn on the *left* of the palm: the hole is on the right,
+        # Note it is drawn on the *left* of the palm: the tear is on the right,
         # and if the two overlapped they would merge into one region, so the
-        # hole would no longer be "closed" and the expected result would stop
+        # tear would no longer be enclosed and the expected result would stop
         # making physical sense.
         cv2.fillPoly(img, [np.array([[270 + ox, 330 + oy],
                                      [370 + ox, 315 + oy],
@@ -125,7 +125,7 @@ NO_GLOVE = ("no glove", "no glove", "no glove", "no glove", "no glove")
 
 def analyse(img):
     """Run the whole pipeline and return
-    (holes, open tears, stains, spottings, plastic contaminations).
+    (enclosed tears, open tears, stains, spottings, plastic contaminations).
     Returns NO_GLOVE when no glove was found."""
     img_norm, img_plain = preprocess(img)
     mask_filled, mask_raw = segment_glove(img_norm)
@@ -135,59 +135,59 @@ def analyse(img):
     bg_color = get_background_color(img_norm)
     defects, _ = run_all_detectors(img_norm, mask_filled, mask_raw, bg_color)
     names = [n for n, _ in defects]
-    return (names.count("Hole"),
+    return (names.count("Tearing"),
             names.count("Open Tear"),
             names.count("Stain"),
             names.count("Spotting"),
             names.count("Plastic Contamination"))
 
 
-# Each scenario is (name, image, expected (holes, tears, stains, spots, plastic))
+# Each scenario is (name, image, expected (enclosed tears, open tears, stains, spots, plastic))
 def build_cases():
     return [
-        ("baseline: 1 hole + 1 stain", make_glove_image(),                          (1, 0, 1, 0, 0)),
+        ("baseline: 1 tearing + 1 stain", make_glove_image(),                       (1, 0, 1, 0, 0)),
         ("odd stain colour (white powder)", make_glove_image(stain_color=(240, 240, 240)),
                                                                                     (1, 0, 1, 0, 0)),
-        ("good glove (zero false alarms)", make_glove_image(hole=False, stain=False),
+        ("good glove (zero false alarms)", make_glove_image(tearing=False, stain=False),
                                                                                     (0, 0, 0, 0, 0)),
-        ("good glove + noise sigma=8", make_glove_image(hole=False, stain=False, noise=8),
+        ("good glove + noise sigma=8", make_glove_image(tearing=False, stain=False, noise=8),
                                                                                     (0, 0, 0, 0, 0)),
-        ("good two-tone material",     make_glove_image(hole=False, stain=False,
+        ("good two-tone material",     make_glove_image(tearing=False, stain=False,
                                                         two_tone=True),             (0, 0, 0, 0, 0)),
         ("dim light: 60% brightness",  make_glove_image(bright=0.6),                (1, 0, 1, 0, 0)),
         ("bright light: 140%",         make_glove_image(bright=1.4),                (1, 0, 1, 0, 0)),
         ("side lighting (dark left)",  make_glove_image(side_light=True),           (1, 0, 1, 0, 0)),
         ("glove off centre",           make_glove_image(offset=(150, -60)),         (1, 0, 1, 0, 0)),
-        ("hole exactly at the centre", make_glove_image(offset=(-30, 0)),           (1, 0, 1, 0, 0)),
+        ("tearing exactly at the centre", make_glove_image(offset=(-30, 0)),        (1, 0, 1, 0, 0)),
         ("background close to glove colour", make_glove_image(bg=(200, 150, 90)),   (1, 0, 1, 0, 0)),
         ("grey glove + grey-white background", make_glove_image(glove=(120, 120, 120),
                                                         bg=(190, 190, 190)),        (1, 0, 1, 0, 0)),
         # --- open tears: the point is not to report the 4 normal finger gaps ---
-        ("open tear in palm side",     make_glove_image(hole=False, stain=False,
+        ("open tear in palm side",     make_glove_image(tearing=False, stain=False,
                                                         open_tear=True),            (0, 1, 0, 0, 0)),
-        ("fingertip tear",             make_glove_image(hole=False, stain=False,
+        ("fingertip tear",             make_glove_image(tearing=False, stain=False,
                                                         fingertip_tear=True),       (0, 1, 0, 0, 0)),
-        ("open tear + closed hole",    make_glove_image(stain=False, open_tear=True),
+        ("open tear + enclosed tearing", make_glove_image(stain=False, open_tear=True),
                                                                                     (1, 1, 0, 0, 0)),
         ("three defects at once",      make_glove_image(open_tear=True),            (1, 1, 1, 0, 0)),
-        ("tear + dim light 60%",       make_glove_image(hole=False, stain=False,
+        ("tear + dim light 60%",       make_glove_image(tearing=False, stain=False,
                                                         open_tear=True, bright=0.6), (0, 1, 0, 0, 0)),
-        ("tear + glove off centre",    make_glove_image(hole=False, stain=False,
+        ("tear + glove off centre",    make_glove_image(tearing=False, stain=False,
                                                         open_tear=True,
                                                         offset=(150, -60)),         (0, 1, 0, 0, 0)),
         ("plain background (no glove at all)", np.full((600, 800, 3), BG, dtype=np.uint8),
                                                                                     NO_GLOVE),
         # --- Spotting: the main criterion is "are there enough dots", not area ---
-        ("spotting: 8 yellow dots",    make_glove_image(hole=False, stain=False,
+        ("spotting: 8 yellow dots",    make_glove_image(tearing=False, stain=False,
                                                         spots=8),                   (0, 0, 0, 8, 0)),
-        ("spotting: 10 yellow dots",   make_glove_image(hole=False, stain=False,
+        ("spotting: 10 yellow dots",   make_glove_image(tearing=False, stain=False,
                                                         spots=10),                  (0, 0, 0, 10, 0)),
         # Below 5 dots Spotting has to give up. This proves it is not just Stain
         # under another name. Here the 3 dots are ~380px each, also under Stain's
         # area threshold, so in the end nothing is reported at all.
-        ("only 3 dots: not spotting",  make_glove_image(hole=False, stain=False,
+        ("only 3 dots: not spotting",  make_glove_image(tearing=False, stain=False,
                                                         spots=3),                   (0, 0, 0, 0, 0)),
-        ("spotting + hole together",   make_glove_image(stain=False, spots=8),      (1, 0, 0, 8, 0)),
+        ("spotting + tearing together", make_glove_image(stain=False, spots=8),     (1, 0, 0, 8, 0)),
     ] + build_material_cases() + build_plastic_cases()
 
 
@@ -207,7 +207,7 @@ KNOWN_FAIL = {("rubber dark grey", "dim 60%")}
 
 
 def build_material_cases():
-    """Material x lighting matrix; every image has 1 hole + 1 stain."""
+    """Material x lighting matrix; every image has 1 tearing + 1 stain."""
     cases = []
     for mname, color in MATERIALS:
         for lname, kw in LIGHTINGS:
@@ -229,13 +229,13 @@ def build_plastic_cases():
          of applying the rule blindly.
     """
     return [
-        ("plastic contamination",     make_glove_image(hole=False, stain=False,
+        ("plastic contamination",     make_glove_image(tearing=False, stain=False,
                                                         plastic=True),           (0, 0, 0, 0, 1)),
-        ("same glove, nothing on it", make_glove_image(hole=False, stain=False), (0, 0, 0, 0, 0)),
+        ("same glove, nothing on it", make_glove_image(tearing=False, stain=False), (0, 0, 0, 0, 0)),
         # The rule does not apply on a white glove, so it must abstain -- decide
         # when there is evidence, never guess when there is none
         ("white glove (material gate must abstain)",
-                                      make_glove_image(hole=False, stain=False,
+                                      make_glove_image(tearing=False, stain=False,
                                                         glove=(235, 235, 235),
                                                         plastic=True),           (0, 0, 0, 0, 0)),
     ]
@@ -259,7 +259,7 @@ def build_known_issues():
         # false alarms (real black-paint stains start at 2734px), and the price
         # is that these two scenarios are missed.
         ("small dark speck (700px)", make_glove_image(stain_color=(20, 20, 20)), (1, 0, 1, 0, 0)),
-        ("small dark speck, no hole", make_glove_image(hole=False,
+        ("small dark speck, no tearing", make_glove_image(tearing=False,
                                              stain_color=(20, 20, 20)), (0, 0, 1, 0, 0)),
     ]
     for mname, color in MATERIALS:

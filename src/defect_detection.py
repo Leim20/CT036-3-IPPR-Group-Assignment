@@ -22,7 +22,7 @@ import numpy as np
 
 # --- Tunable parameters, kept together so a sensitivity study is easy to run
 #     and easy to write up in the report ---
-BG_MATCH_DIST = 30.0       # hole rule: a candidate counts as a hole only if its
+BG_MATCH_DIST = 30.0       # tearing rule: a candidate counts only if its
                            # Lab distance to the background colour is below this
 STAIN_MASK_ERODE_KSIZE = 7     # drop the rim where glove and background blend
 STAIN_NEUTRAL_S_MAX = 45       # HSV: below this the material counts as neutral
@@ -187,17 +187,17 @@ PLASTIC_GROW_MAX_RATIO = 0.25   # if it grows past this it has probably leaked, 
 # alongside the newer teammate stain/spot/plastic rules above. ---
 STAIN_COLOR_DIST = 25.0    # stain criterion: pixel's Lab distance from the glove's normal colour must be above this
 
-# Hole detector parameters. The photographed gloves are worn on a hand, so a
+# Tearing detector parameters. The photographed gloves are worn on a hand, so an
 # puncture reveals skin rather than the green background. Candidate skin pixels
 # must form an enclosed, locally high-contrast region well inside the glove.
-HOLE_BOUNDARY_KSIZE = 13
-HOLE_RING_KSIZE = 11
-HOLE_DEFAULT_RULE = {
+TEARING_BOUNDARY_KSIZE = 13
+TEARING_RING_KSIZE = 11
+TEARING_DEFAULT_RULE = {
     "min_area": 60,
     "min_local_contrast": 30.0,
     "min_interior_ratio": 0.20,
 }
-HOLE_MATERIAL_RULES = {
+TEARING_MATERIAL_RULES = {
     # Cotton weave can expose many tiny skin-coloured gaps, so genuine damage
     # must be larger and have a sharper boundary.
     "cotton": {
@@ -206,7 +206,7 @@ HOLE_MATERIAL_RULES = {
         "min_interior_ratio": 0.20,
     },
     # Latex foam is opaque and uniform; even a small enclosed skin region is
-    # strong evidence, and the dataset produced no non-hole candidates.
+    # strong evidence, and the dataset produced no non-tearing candidates.
     "latex_foam": {
         "min_area": 60,
         "min_local_contrast": 0.0,
@@ -257,7 +257,11 @@ FINGER_NOT_ENOUGH_MATERIAL_RULES = {
         "row_max_y_ratio": 0.55,
         "row_support_ratio": 0.08,
         "row_target_count": 2,
-        "skin_min_area_ratio": 0.024,
+        # Evaluate each exposed finger separately.  Four uncovered fingers are
+        # four medium components, not one large skin region, so the old 2.4%
+        # gate discarded all of them.  Shape and glove-attachment checks below
+        # provide the cotton-specific false-positive protection instead.
+        "skin_min_area_ratio": 0.008,
         "skin_max_width_ratio": 0.30,
         "skin_min_boundary_ratio": 0.05,
         "skin_max_y_ratio": 0.72,
@@ -293,6 +297,19 @@ FINGER_NOT_ENOUGH_MATERIAL_RULES = {
 }
 FINGER_REGION_HEIGHT_RATIO = 0.80
 FINGER_SKIN_BOUNDARY_KSIZE = 13
+# An exposed fingertip remains part of the hand silhouette, so it does not
+# necessarily reduce the number of visible finger columns.  Instead, verify
+# that the glove boundary wraps around the skin component in both axes.  This
+# distinguishes a bare fingertip from a skin-coloured stain that merely touches
+# one edge of the glove.
+FINGER_SKIN_TIP_MIN_ASPECT_RATIO = 1.20
+FINGER_SKIN_TIP_MIN_BOUNDARY_SPAN_RATIO = 0.65
+FINGER_SKIN_MIN_Y_RATIO = -0.45
+FINGER_SKIN_ATTACHMENT_RADIUS_RATIO = 0.02
+FINGER_SKIN_EXTERNAL_MAX_INSIDE_RATIO = 0.50
+FINGER_SKIN_EXTERNAL_MIN_NEAR_RATIO = 0.03
+FINGER_SKIN_EXTERNAL_MIN_LOWER_NEAR_RATIO = 0.08
+FINGER_SKIN_LOWER_START_RATIO = 0.65
 
 # Thin / overstretched detector. These thresholds were measured on the
 # development photographs after isolating glove-coloured pixels from the
@@ -300,6 +317,11 @@ FINGER_SKIN_BOUNDARY_KSIZE = 13
 # latex foam has no reliable transparency cue, so its lower-confidence branch
 # uses only a coarse edge-density measurement and is documented as experimental.
 THIN_BLUE_H_MIN, THIN_BLUE_H_MAX = 85, 145
+# Purple/blue inspection backdrops overlap the broad generic blue interval, but
+# the photographed nitrile glove remains at H=107-115.  A nitrile-specific cap
+# prevents the backdrop from becoming the material ROI and depressing its
+# lightness statistic.
+THIN_NITRILE_BLUE_H_MAX = 115
 THIN_BLUE_S_MIN, THIN_BLUE_V_MIN = 40, 35
 THIN_WHITE_S_MAX, THIN_WHITE_V_MIN = 35, 95
 THIN_ROI_CLOSE_KSIZE = 9
@@ -326,7 +348,7 @@ THIN_LATEX_LOW_S_MEDIAN_MAX = 140.0
 THIN_LATEX_BRIGHT_LIGHT_P25_MIN = 112.0
 THIN_LATEX_BRIGHT_S_MEDIAN_MAX = 160.0
 
-MIN_AREA_HOLE = 60
+MIN_AREA_TEARING = 60
 MIN_AREA_STAIN = 500           # smallest stain at the standard 800px width.
                                # Crease-shadow false alarms all sit at 500-600px
                                # and the smallest real stain is 1700px, so the
@@ -337,7 +359,7 @@ MIN_AREA_STAIN = 500           # smallest stain at the standard 800px width.
 # as the GUI's legend.
 DEFECT_COLORS = {
     "Stain": (0, 140, 255),          # orange
-    "Hole": (40, 40, 220),          # red
+    "Tearing": (40, 40, 220),       # red
     "Open Tear": (190, 55, 150),    # purple
     "Finger Not Enough": (0, 165, 255),
     "Thin / Overstretched": (255, 0, 255),
@@ -395,7 +417,7 @@ DEDUP_IOU = 0.5   # when two detectors' boxes overlap by more than this, keep on
 # The semi-transparent colours make the original glove texture remain visible.
 DEFECT_OVERLAY_ALPHA = 0.45
 DEFECT_OVERLAY_COLORS = {
-    "Hole": (0, 0, 255),                   # red (BGR)
+    "Tearing": (0, 0, 255),                # red (BGR)
     "Open Tear": (0, 80, 255),             # orange-red
     "Finger Not Enough": (0, 165, 255),     # orange
     "Thin / Overstretched": (255, 0, 255),  # magenta
@@ -406,26 +428,26 @@ THIN_SEGMENT_DENSITY_MIN = 2
 
 
 # ============================================================
-# Defect 1: closed hole
+# Defect 1: enclosed tearing
 # ============================================================
-def detect_holes(img, mask_filled, mask_raw, bg_color,
-                 img_plain=None, material=None):
+def detect_tearing(img, mask_filled, mask_raw, bg_color,
+                   img_plain=None, material=None):
     """Detect enclosed punctures that expose the wearer's skin.
 
     The previous implementation searched for green-background pixels inside
     the glove. That assumption did not match the real dataset: the gloves are
-    worn, so their holes reveal skin. This detector therefore uses two
+    worn, so their torn openings reveal skin. This detector therefore uses two
     classical skin-colour rules, then rejects candidates that touch the glove's
     outside boundary, lack a sharp colour transition, or sit too close to the
     silhouette edge. Those checks prevent exposed fingertips from being
-    labelled as palm holes.
+    labelled as palm tearing.
 
     When no material metadata is supplied (as in the synthetic regression
     tests), a strict background-revealing fallback is also run. Real dataset
     calls always provide their material and use the calibrated skin rule.
     """
     source = img_plain if img_plain is not None else img
-    rule = HOLE_MATERIAL_RULES.get(material, HOLE_DEFAULT_RULE)
+    rule = TEARING_MATERIAL_RULES.get(material, TEARING_DEFAULT_RULE)
 
     ycrcb = cv2.cvtColor(source, cv2.COLOR_BGR2YCrCb)
     y, cr, cb = cv2.split(ycrcb)
@@ -454,10 +476,10 @@ def detect_holes(img, mask_filled, mask_raw, bg_color,
     count, labels, stats, _ = cv2.connectedComponentsWithStats(candidate, 8)
 
     # Any colour anomaly touching this inner boundary band is an exposed outer
-    # edge/fingertip, not an enclosed hole.
+    # edge/fingertip, not an enclosed tear.
     eroded = cv2.erode(
         mask_filled,
-        np.ones((HOLE_BOUNDARY_KSIZE, HOLE_BOUNDARY_KSIZE), np.uint8),
+        np.ones((TEARING_BOUNDARY_KSIZE, TEARING_BOUNDARY_KSIZE), np.uint8),
     )
     boundary_band = (mask_filled > 0) & (eroded == 0)
     touching_boundary = set(np.unique(labels[boundary_band]))
@@ -476,7 +498,7 @@ def detect_holes(img, mask_filled, mask_raw, bg_color,
         component = (labels == label).astype(np.uint8)
         ring = cv2.dilate(
             component,
-            np.ones((HOLE_RING_KSIZE, HOLE_RING_KSIZE), np.uint8),
+            np.ones((TEARING_RING_KSIZE, TEARING_RING_KSIZE), np.uint8),
         ) - component
         ring_pixels = (ring > 0) & (mask_filled > 0)
         if not ring_pixels.any():
@@ -513,13 +535,13 @@ def detect_holes(img, mask_filled, mask_raw, bg_color,
             0.25 * area_fit + 0.45 * contrast_fit + 0.30 * depth_fit
         )
         results.append(Detection(
-            "Hole",
+            "Tearing",
             (x, y0, width, height),
             component * 255,
             round(float(evidence), 1),
         ))
     if material is None:
-        # Generic fallback for an unworn glove: an enclosed hole reveals the
+        # Generic fallback for an unworn glove: an enclosed tear reveals the
         # photographed background. Keep this separate from the real-data rule
         # so porous/translucent materials do not acquire its false positives.
         background_candidate = cv2.subtract(mask_filled, mask_raw)
@@ -533,7 +555,7 @@ def detect_holes(img, mask_filled, mask_raw, bg_color,
         )
         lab_normalized = cv2.cvtColor(img, cv2.COLOR_BGR2LAB).astype(np.float32)
         for contour in contours:
-            if cv2.contourArea(contour) < HOLE_DEFAULT_RULE["min_area"]:
+            if cv2.contourArea(contour) < TEARING_DEFAULT_RULE["min_area"]:
                 continue
             blob = np.zeros(background_candidate.shape, np.uint8)
             cv2.drawContours(blob, [contour], -1, 255, cv2.FILLED)
@@ -544,13 +566,13 @@ def detect_holes(img, mask_filled, mask_raw, bg_color,
                 size_fit = min(
                     1.0,
                     cv2.contourArea(contour) /
-                    (HOLE_DEFAULT_RULE["min_area"] * 4.0),
+                    (TEARING_DEFAULT_RULE["min_area"] * 4.0),
                 )
                 evidence = 50.0 + 50.0 * (
                     0.75 * color_fit + 0.25 * size_fit
                 )
                 results.append(Detection(
-                    "Hole",
+                    "Tearing",
                     cv2.boundingRect(contour),
                     blob,
                     round(float(evidence), 1),
@@ -637,9 +659,12 @@ def detect_finger_not_enough(img, mask_filled, mask_raw, bg_color,
     bare finger, while others have one glove finger folded out of view.
 
     1. A sufficiently large skin-coloured component inside the upper glove
-       silhouette supports an exposed finger when the silhouette also has a
-       missing finger column. Colour alone is insufficient because a brown
-       stain can fall inside the same broad skin-colour thresholds.
+       silhouette indicates an exposed finger when the silhouette boundary
+       wraps around a finger-shaped component. Skin immediately outside the
+       material mask is also accepted when its lower end attaches to the glove;
+       segmentation can otherwise discard every bare finger on cotton gloves.
+       Each accepted component becomes its own detection region. A weaker skin
+       component still needs support from a missing finger column.
     2. Convex-hull indentation count describes the missing space between the
        remaining finger shapes.
     3. The number of persistent foreground runs across upper rows describes
@@ -816,31 +841,16 @@ def detect_finger_not_enough(img, mask_filled, mask_raw, bg_color,
             persistent_run_count = run_count
             break
 
-    # Use the original (non-lighting-normalised) colour for skin evidence.
+    # Use the original (non-lighting-normalised) colour for skin evidence.  Do
+    # not intersect it with ``mask_filled`` here: on strongly coloured cotton,
+    # segmentation often keeps only the glove material and drops the bare
+    # fingers as separate components.  Their proximity and lower-end attachment
+    # to the material mask are verified explicitly below.
     source = img_plain if img_plain is not None else img
-    ycrcb = cv2.cvtColor(source, cv2.COLOR_BGR2YCrCb)
-    y_channel, cr_channel, cb_channel = cv2.split(ycrcb)
-    skin_ycrcb = (
-        (y_channel > SKIN_Y_MIN)
-        & (cr_channel >= SKIN_CR_MIN) & (cr_channel <= SKIN_CR_MAX)
-        & (cb_channel >= SKIN_CB_MIN) & (cb_channel <= SKIN_CB_MAX)
-    )
-    hsv = cv2.cvtColor(source, cv2.COLOR_BGR2HSV)
-    hue, saturation, value = cv2.split(hsv)
-    skin_hsv = (
-        ((hue <= SKIN_H_MAX) | (hue >= SKIN_H_WRAP_MIN))
-        & (saturation >= SKIN_S_MIN)
-        & (value >= SKIN_V_MIN)
-    )
-
-    upper_region = np.zeros(mask_filled.shape, dtype=bool)
     finger_region_height = max(
         1, int(round(height * FINGER_REGION_HEIGHT_RATIO))
     )
-    upper_region[y0:y0 + finger_region_height, x:x + width] = True
-    skin_candidate = (
-        skin_ycrcb & skin_hsv & (mask_filled > 0) & upper_region
-    ).astype(np.uint8)
+    skin_candidate = (_skin_colour_mask(source) > 0).astype(np.uint8)
     skin_candidate = cv2.morphologyEx(
         skin_candidate, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)
     )
@@ -851,7 +861,7 @@ def detect_finger_not_enough(img, mask_filled, mask_raw, bg_color,
         cv2.connectedComponentsWithStats(skin_candidate, 8)
     )
     # A missing or shortened finger exposes skin at the glove's outer edge.
-    # Requiring boundary contact prevents an enclosed palm hole or internal
+    # Requiring boundary contact prevents enclosed palm tearing or internal
     # translucent patch from becoming Finger Not Enough merely because it is
     # skin-coloured.
     eroded_glove = cv2.erode(
@@ -862,9 +872,18 @@ def detect_finger_not_enough(img, mask_filled, mask_raw, bg_color,
         ),
     )
     glove_boundary = (mask_filled > 0) & (eroded_glove == 0)
-    exposed_skin = False
-    exposed_skin_box = None
-    exposed_skin_strength = 0.0
+
+    attachment_radius = max(
+        3, int(round(width * FINGER_SKIN_ATTACHMENT_RADIUS_RATIO))
+    )
+    near_glove = cv2.dilate(
+        mask_filled,
+        cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (2 * attachment_radius + 1, 2 * attachment_radius + 1),
+        ),
+    ) > 0
+    skin_records = []
     for label in range(1, skin_component_count):
         component_area = int(skin_stats[label, cv2.CC_STAT_AREA])
         component_area_ratio = float(component_area) / hull_area
@@ -879,78 +898,161 @@ def detect_finger_not_enough(img, mask_filled, mask_raw, bg_color,
             continue
 
         component = skin_labels == label
+        inside_ratio = (
+            float(np.count_nonzero(component & (mask_filled > 0)))
+            / max(component_area, 1)
+        )
         boundary_ratio = (
             float(np.count_nonzero(component & glove_boundary))
             / max(component_area, 1)
         )
+        component_height = int(skin_stats[label, cv2.CC_STAT_HEIGHT])
+        component_width = int(skin_stats[label, cv2.CC_STAT_WIDTH])
+        component_aspect_ratio = (
+            float(component_height) / max(component_width, 1)
+        )
+        boundary_y, boundary_x = np.nonzero(component & glove_boundary)
+        if boundary_x.size:
+            boundary_x_span_ratio = (
+                float(np.ptp(boundary_x) + 1) / max(component_width, 1)
+            )
+            boundary_y_span_ratio = (
+                float(np.ptp(boundary_y) + 1) / max(component_height, 1)
+            )
+        else:
+            boundary_x_span_ratio = 0.0
+            boundary_y_span_ratio = 0.0
+        component_is_internal_tip = (
+            component_aspect_ratio >= FINGER_SKIN_TIP_MIN_ASPECT_RATIO
+            and boundary_x_span_ratio
+            >= FINGER_SKIN_TIP_MIN_BOUNDARY_SPAN_RATIO
+            and boundary_y_span_ratio
+            >= FINGER_SKIN_TIP_MIN_BOUNDARY_SPAN_RATIO
+        )
         component_y_ratio = (
             float(skin_centroids[label, 1]) - y0
         ) / max(height, 1)
-        if (
-            boundary_ratio >= rule["skin_min_boundary_ratio"]
+        if not (
+            component_y_ratio >= FINGER_SKIN_MIN_Y_RATIO
             and component_y_ratio <= rule["skin_max_y_ratio"]
         ):
-            exposed_skin = True
-            exposed_skin_box = (
-                int(skin_stats[label, cv2.CC_STAT_LEFT]),
-                int(skin_stats[label, cv2.CC_STAT_TOP]),
-                int(skin_stats[label, cv2.CC_STAT_WIDTH]),
-                int(skin_stats[label, cv2.CC_STAT_HEIGHT]),
-            )
-            area_fit = min(
+            continue
+
+        component_top = int(skin_stats[label, cv2.CC_STAT_TOP])
+        lower_start = component_top + int(round(
+            component_height * FINGER_SKIN_LOWER_START_RATIO
+        ))
+        lower_component = component.copy()
+        lower_component[:lower_start] = False
+        lower_area = int(np.count_nonzero(lower_component))
+        near_ratio = (
+            float(np.count_nonzero(component & near_glove))
+            / max(component_area, 1)
+        )
+        lower_near_ratio = (
+            float(np.count_nonzero(lower_component & near_glove))
+            / max(lower_area, 1)
+        )
+        component_is_external_tip = (
+            inside_ratio < FINGER_SKIN_EXTERNAL_MAX_INSIDE_RATIO
+            and component_aspect_ratio >= FINGER_SKIN_TIP_MIN_ASPECT_RATIO
+            and near_ratio >= FINGER_SKIN_EXTERNAL_MIN_NEAR_RATIO
+            and lower_near_ratio >= FINGER_SKIN_EXTERNAL_MIN_LOWER_NEAR_RATIO
+        )
+        internal_skin_evidence = (
+            inside_ratio >= FINGER_SKIN_EXTERNAL_MAX_INSIDE_RATIO
+            and boundary_ratio >= rule["skin_min_boundary_ratio"]
+        )
+        external_skin_evidence = component_is_external_tip
+        if not (internal_skin_evidence or external_skin_evidence):
+            continue
+
+        area_fit = min(
+            1.0,
+            component_area_ratio
+            / max(2.0 * rule["skin_min_area_ratio"], 1e-6),
+        )
+        if external_skin_evidence:
+            contact_fit = min(
                 1.0,
-                component_area_ratio
-                / max(2.0 * rule["skin_min_area_ratio"], 1e-6),
+                lower_near_ratio
+                / max(2.0 * FINGER_SKIN_EXTERNAL_MIN_LOWER_NEAR_RATIO, 1e-6),
             )
-            boundary_fit = min(
+        else:
+            contact_fit = min(
                 1.0,
                 boundary_ratio
                 / max(2.0 * rule["skin_min_boundary_ratio"], 1e-6),
             )
-            vertical_fit = np.clip(
-                1.0 - component_y_ratio / rule["skin_max_y_ratio"],
-                0.0,
-                1.0,
-            )
-            exposed_skin_strength = float(
-                0.45 * area_fit + 0.35 * boundary_fit + 0.20 * vertical_fit
-            )
-            break
+        vertical_fit = np.clip(
+            1.0 - max(component_y_ratio, 0.0) / rule["skin_max_y_ratio"],
+            0.0,
+            1.0,
+        )
+        candidate_strength = float(
+            0.45 * area_fit + 0.35 * contact_fit + 0.20 * vertical_fit
+        )
+        component_is_exposed_tip = (
+            component_is_internal_tip or component_is_external_tip
+        )
+        candidate_box = (
+            int(skin_stats[label, cv2.CC_STAT_LEFT]),
+            int(skin_stats[label, cv2.CC_STAT_TOP]),
+            component_width,
+            component_height,
+        )
+        component_mask = component.astype(np.uint8) * 255
+        skin_records.append((
+            candidate_box,
+            component_mask,
+            component_is_exposed_tip,
+            candidate_strength,
+        ))
     missing_space = (
         qualifying_indentations == rule["indent_target_count"]
     )
     missing_column = persistent_run_count == rule["row_target_count"]
-    skin_with_shape_support = exposed_skin and missing_column
-    if not (missing_space or skin_with_shape_support):
-        return []
-
-    indentation_strength = (
-        float(np.mean(indentation_strengths))
-        if missing_space and indentation_strengths
-        else 0.0
-    )
     row_support = float(run_histogram[rule["row_target_count"]:].sum())
     row_strength = (
         min(1.0, row_support / max(2.0 * minimum_support_rows, 1.0))
         if missing_column
         else 0.0
     )
-    skin_shape_strength = (
-        0.60 * exposed_skin_strength + 0.40 * row_strength
-        if skin_with_shape_support
-        else 0.0
+    accepted_skin = [
+        record for record in skin_records
+        if record[2] or missing_column
+    ]
+    if accepted_skin:
+        results = []
+        for box, component_mask, is_tip, strength in accepted_skin:
+            skin_shape_strength = (
+                0.70 * strength + 0.30
+                if is_tip
+                else 0.60 * strength + 0.40 * row_strength
+            )
+            evidence = 50.0 + 50.0 * skin_shape_strength
+            results.append(Detection(
+                "Finger Not Enough",
+                box,
+                component_mask,
+                round(float(evidence), 1),
+            ))
+        return sorted(results, key=lambda result: result.box[0])
+
+    if not missing_space:
+        return []
+
+    indentation_strength = (
+        float(np.mean(indentation_strengths))
+        if indentation_strengths else 0.0
     )
-    cue_strength = max(indentation_strength, skin_shape_strength)
-    evidence = 50.0 + 50.0 * cue_strength
+    evidence = 50.0 + 50.0 * indentation_strength
 
     # Localise the evidence for the display stage. Exposed skin is already a
     # real pixel region; otherwise the largest abnormal hull gap is the best
     # estimate of where a completely absent finger should have been. The full
     # upper zone remains a safe last resort for a row-count-only recognition.
-    result_box = (
-        exposed_skin_box if skin_with_shape_support
-        else largest_indentation_box
-    )
+    result_box = largest_indentation_box
     if result_box is None:
         result_box = (
             x,
@@ -994,7 +1096,10 @@ def _thin_material_region(source, material):
             selected, subtype = blue, "blue"
         else:
             selected, subtype = white, "white"
-    elif material in {"nitrile", "latex_foam"}:
+    elif material == "nitrile":
+        selected = blue & (hue <= THIN_NITRILE_BLUE_H_MAX)
+        subtype = "blue"
+    elif material == "latex_foam":
         selected, subtype = blue, "blue"
     else:
         return None, None
@@ -1081,6 +1186,24 @@ def detect_thin_area(img, mask_filled, mask_raw, bg_color,
     """
     source = img_plain if img_plain is not None else img
     material_key = str(material).lower() if material is not None else None
+    known_materials = {"cotton", "nitrile", "latex_foam"}
+    if material_key not in known_materials:
+        # No filename-based guess: evaluate the increasingly general physical
+        # cues directly. Nitrile comes first because its narrow hue ROI rejects
+        # the purple-blue backdrop that can pollute the generic blue region.
+        for candidate_material in ("nitrile", "latex_foam", "cotton"):
+            candidate = detect_thin_area(
+                img,
+                mask_filled,
+                mask_raw,
+                bg_color,
+                img_plain=source,
+                material=candidate_material,
+            )
+            if candidate:
+                return candidate
+        return []
+
     region, cotton_subtype = _thin_material_region(source, material_key)
     if region is None:
         return []
@@ -1131,9 +1254,16 @@ def detect_thin_area(img, mask_filled, mask_raw, bg_color,
     largest_skin_share = float(largest_skin_area) / max(skin_area, 1)
 
     is_thin = False
+    rule_strength = 0.0
     if material_key == "cotton" and cotton_subtype == "blue":
         saturation_p25 = float(np.percentile(saturation[interior], 25))
         is_thin = saturation_p25 < THIN_COTTON_BLUE_S25_MAX
+        if is_thin:
+            rule_strength = float(np.clip(
+                (THIN_COTTON_BLUE_S25_MAX - saturation_p25) / 40.0,
+                0.0,
+                1.0,
+            ))
     elif material_key == "cotton":
         grid_coverage = _thin_grid_coverage(skin, region)
         is_thin = (
@@ -1144,6 +1274,31 @@ def detect_thin_area(img, mask_filled, mask_raw, bg_color,
             <= THIN_COTTON_WHITE_SKIN_MAX_LARGEST_SHARE
             and grid_coverage >= THIN_COTTON_WHITE_GRID_MIN_COVERAGE
         )
+        if is_thin:
+            skin_fit = min(
+                1.0,
+                skin_ratio / max(2.0 * THIN_COTTON_WHITE_SKIN_MIN_RATIO, 1e-6),
+            )
+            component_fit = min(
+                1.0,
+                sizeable_skin_components
+                / max(2.0 * THIN_COTTON_WHITE_SKIN_MIN_COMPONENTS, 1.0),
+            )
+            distribution_fit = float(np.clip(
+                1.0
+                - largest_skin_share
+                / max(THIN_COTTON_WHITE_SKIN_MAX_LARGEST_SHARE, 1e-6),
+                0.0,
+                1.0,
+            ))
+            grid_fit = min(
+                1.0,
+                grid_coverage
+                / max(2.0 * THIN_COTTON_WHITE_GRID_MIN_COVERAGE, 1e-6),
+            )
+            rule_strength = float(np.mean((
+                skin_fit, component_fit, distribution_fit, grid_fit,
+            )))
     elif material_key == "nitrile":
         dispersed_skin = (
             skin_ratio >= THIN_NITRILE_SKIN_MIN_RATIO
@@ -1164,6 +1319,44 @@ def detect_thin_area(img, mask_filled, mask_raw, bg_color,
             and skin_ratio < THIN_NITRILE_SKIN_MAX_RATIO
         )
         is_thin = dispersed_skin or broadly_pale or shadow_pale
+        if dispersed_skin:
+            ratio_fit = float(np.clip(
+                (skin_ratio - THIN_NITRILE_SKIN_MIN_RATIO)
+                / max(
+                    THIN_NITRILE_SKIN_MAX_RATIO
+                    - THIN_NITRILE_SKIN_MIN_RATIO,
+                    1e-6,
+                ),
+                0.0,
+                1.0,
+            ))
+            component_fit = min(
+                1.0,
+                sizeable_skin_components
+                / max(2.0 * THIN_NITRILE_SKIN_MIN_COMPONENTS, 1.0),
+            )
+            rule_strength = max(
+                rule_strength, 0.35 + 0.65 * (ratio_fit + component_fit) / 2.0
+            )
+        if broadly_pale or shadow_pale:
+            saturation_limit = (
+                THIN_NITRILE_S_MEDIAN_MAX
+                if broadly_pale else THIN_NITRILE_SHADOW_S_MEDIAN_MAX
+            )
+            light_fit = float(np.clip(
+                (lightness_p25 - THIN_NITRILE_LIGHT_P25_MIN) / 40.0,
+                0.0,
+                1.0,
+            ))
+            saturation_fit = float(np.clip(
+                (saturation_limit - saturation_median) / 50.0,
+                0.0,
+                1.0,
+            ))
+            rule_strength = max(
+                rule_strength,
+                0.35 + 0.65 * (light_fit + saturation_fit) / 2.0,
+            )
     elif material_key == "latex_foam":
         gray = cv2.cvtColor(source, cv2.COLOR_BGR2GRAY)
         laplacian = np.abs(cv2.Laplacian(gray, cv2.CV_32F, ksize=3))
@@ -1182,6 +1375,31 @@ def detect_thin_area(img, mask_filled, mask_raw, bg_color,
                 )
             )
         )
+        if is_thin:
+            saturation_limit = (
+                THIN_LATEX_LOW_S_MEDIAN_MAX
+                if saturation_median < THIN_LATEX_LOW_S_MEDIAN_MAX
+                else THIN_LATEX_BRIGHT_S_MEDIAN_MAX
+            )
+            light_fit = float(np.clip(
+                (lightness_p25 - THIN_LATEX_LIGHT_P25_MIN) / 40.0,
+                0.0,
+                1.0,
+            ))
+            edge_fit = float(np.clip(
+                (THIN_LATEX_LAPLACIAN_MEAN_MAX - laplacian_mean)
+                / max(THIN_LATEX_LAPLACIAN_MEAN_MAX, 1e-6),
+                0.0,
+                1.0,
+            ))
+            saturation_fit = float(np.clip(
+                (saturation_limit - saturation_median) / 60.0,
+                0.0,
+                1.0,
+            ))
+            rule_strength = (
+                0.20 * light_fit + 0.45 * edge_fit + 0.35 * saturation_fit
+            )
 
     if not is_thin:
         return []
@@ -1191,9 +1409,17 @@ def detect_thin_area(img, mask_filled, mask_raw, bg_color,
     )
     if not contours:
         return []
-    return [("Thin / Overstretched", cv2.boundingRect(
-        max(contours, key=cv2.contourArea)
-    ))]
+    box = cv2.boundingRect(max(contours, key=cv2.contourArea))
+    defect_mask = _segment_thin_area(
+        source, mask_filled, box, material_key
+    )
+    evidence = 50.0 + 50.0 * float(np.clip(rule_strength, 0.0, 1.0))
+    return [Detection(
+        "Thin / Overstretched",
+        box,
+        defect_mask,
+        round(evidence, 1),
+    )]
 
 
 # ============================================================
@@ -1215,7 +1441,7 @@ def detect_plastic_contamination(img, mask_filled, mask_raw, bg_color,
     report's "choice of technique" section is about):
         detect_stains      chroma *deviates* from the material   -> coloured stains
         detect_spotting    *counts* small round coloured dots    -> scattered spots
-        detect_holes       candidate colour *equals* the backdrop -> holes right through
+        detect_tearing     candidate colour *equals* the backdrop -> openings right through
         this function      *local density* of unsaturated glare  -> transparent film
 
     Known limitations:
@@ -1830,7 +2056,7 @@ def detect_stains(img, mask_filled, mask_raw, bg_color,
 # Detector registry: once you have written your function, add its name here
 # ============================================================
 DETECTORS = [
-    detect_holes,
+    detect_tearing,
     detect_open_tears,
     detect_finger_not_enough,
     detect_thin_area,
@@ -1857,7 +2083,7 @@ def _box_iou(a, b):
 
 def deduplicate(defects):
     """The same defect is often reported by several detectors at once (a large
-    hole also satisfies "thin area", for instance). Keep whichever comes first in
+    tear also satisfies "thin area", for instance). Keep whichever comes first in
     the DETECTORS registration order.
     """
     kept = []
@@ -1946,8 +2172,8 @@ def _mask_inside_box(mask, box):
     return clipped
 
 
-def _segment_hole(source, mask_filled, mask_raw, box):
-    """Return only the accepted skin/background opening inside a hole box."""
+def _segment_tearing(source, mask_filled, mask_raw, box):
+    """Return only the accepted skin/background opening inside a tearing box."""
     skin = _skin_colour_mask(source, mask_filled)
     skin = cv2.morphologyEx(
         skin, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)
@@ -2080,42 +2306,17 @@ def _segment_finger_not_enough(source, mask_filled, box, material):
 
     segmented = np.zeros_like(mask_filled)
 
-    # If the shortened finger exposes skin, include only components satisfying
-    # the same size, boundary-contact and vertical-position evidence used by
-    # the recogniser.
-    skin = _skin_colour_mask(source, mask_filled)
+    # Recognition has already validated and tightly boxed an exposed finger.
+    # Re-segment skin without clipping it to the material mask: on cotton the
+    # bare finger can sit immediately outside ``mask_filled``.
+    skin = _skin_colour_mask(source)
     skin = cv2.morphologyEx(
         skin, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)
     )
     skin = cv2.morphologyEx(
         skin, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8)
     )
-    eroded = cv2.erode(
-        mask_filled,
-        np.ones(
-            (FINGER_SKIN_BOUNDARY_KSIZE, FINGER_SKIN_BOUNDARY_KSIZE),
-            np.uint8,
-        ),
-    )
-    glove_boundary = (mask_filled > 0) & (eroded == 0)
-    skin_count, skin_labels, skin_stats, skin_centroids = (
-        cv2.connectedComponentsWithStats((skin > 0).astype(np.uint8), 8)
-    )
-    for label in range(1, skin_count):
-        area = int(skin_stats[label, cv2.CC_STAT_AREA])
-        component = skin_labels == label
-        boundary_ratio = (
-            float(np.count_nonzero(component & glove_boundary)) / max(area, 1)
-        )
-        y_ratio = (
-            float(skin_centroids[label, 1]) - glove_y
-        ) / max(glove_height, 1)
-        if (
-            float(area) / hull_area >= rule["skin_min_area_ratio"]
-            and boundary_ratio >= rule["skin_min_boundary_ratio"]
-            and y_ratio <= rule["skin_max_y_ratio"]
-        ):
-            segmented[component & (box_mask > 0)] = 255
+    segmented = cv2.bitwise_and(skin, box_mask)
 
     if cv2.countNonZero(segmented) == 0 and best_label is not None:
         segmented = _visible_short_finger(
@@ -2239,9 +2440,9 @@ def build_defect_masks(img, mask_filled, mask_raw, bg_color, defects,
             and defect.mask.shape == mask_filled.shape
         ):
             mask = defect.mask
-        elif name == "Hole":
+        elif name == "Tearing":
             if name not in reusable:
-                reusable[name] = _segment_hole(
+                reusable[name] = _segment_tearing(
                     source, mask_filled, mask_raw, full_box
                 )
             mask = _mask_inside_box(reusable[name], box)
@@ -2288,8 +2489,14 @@ def detection_mask(defect, shape):
 
 
 def affected_area_percentage(defects, glove_mask):
-    """Union of all defect pixels divided by the glove's filled outline, as a
-    percentage."""
+    """Defect pixels as a percentage of the reconstructed inspection region.
+
+    Most defect masks lie inside the segmented glove, so this is identical to
+    dividing by the filled glove outline. An uncovered finger can legitimately
+    lie just outside a material-only cotton mask; including accepted defect
+    pixels in the denominator prevents that real region from being reported as
+    0.00% affected.
+    """
     glove = glove_mask > 0
     glove_pixels = int(np.count_nonzero(glove))
     if glove_pixels == 0 or not defects:
@@ -2297,7 +2504,11 @@ def affected_area_percentage(defects, glove_mask):
     affected = np.zeros(glove.shape, dtype=bool)
     for defect in defects:
         affected |= detection_mask(defect, glove_mask.shape)
-    return 100.0 * np.count_nonzero(affected & glove) / glove_pixels
+    inspection_region = glove | affected
+    return (
+        100.0 * np.count_nonzero(affected)
+        / max(int(np.count_nonzero(inspection_region)), 1)
+    )
 
 
 def overall_evidence_score(defects, image_shape):
