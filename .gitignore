@@ -21,6 +21,9 @@ dataset/raw/**
 !dataset/raw/**/
 !dataset/raw/**/.gitkeep
 
+# This labelled dataset is approved for inclusion in the repository.
+!dataset/raw/tearing/**
+
 # Local machine-specific config
 .claude/settings.local.json
 
