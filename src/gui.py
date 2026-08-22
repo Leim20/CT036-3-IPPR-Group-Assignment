@@ -69,7 +69,7 @@ DETECTOR_LABELS = {
     "detect_missing_finger": "Missing Finger",
     "detect_fused_fingers": "Fused Fingers",
     "detect_discoloration": "Discoloration",
-    "detect_oversize": "Oversize",
+    "detect_plastic_contamination": "Plastic Contamination",
     "detect_thin_area": "Thin",
     "detect_wrinkles": "Wrinkles/Dent",
 }
@@ -396,7 +396,8 @@ class GloveDefectApp:
         panel.image = None
 
     def _reset_detection_result(self):
-        """清除旧结果,防止换图/换 detector 后误保存上一次标注图。"""
+        """Clear the previous result, so switching image or detector cannot save
+        last run's annotated picture by mistake."""
         self.annotated_result = None
         self.save_button.configure(state=tk.DISABLED)
         self.affected_area_var.set("Affected area: —")
@@ -416,7 +417,8 @@ class GloveDefectApp:
         panel.image = photo
 
     def save_result(self):
-        """让用户把当前右侧的完整分辨率标注图保存成 PNG/JPEG。"""
+        """Let the user save the full-resolution annotated image on the right
+        as a PNG or JPEG."""
         if self.annotated_result is None or self.selected_image_path is None:
             messagebox.showwarning(
                 "No Result", "Run detection before saving an annotated result."

@@ -1,39 +1,51 @@
 # -*- coding: utf-8 -*-
 """
-手套分割模块:把手套从背景里分出来,得到一张黑白掩膜(白=手套,黑=背景)。
+Glove segmentation: separate the glove from the background and return a
+binary mask (white = glove, black = background).
 
-思路:取画面四条边框的颜色当"背景参考色",算每个像素跟它的颜色距离,
-用 Otsu 自动阈值找分界线。
+Approach: sample the colour of the four image borders as a "background
+reference colour", measure how far every pixel is from it, and let Otsu
+pick the cut-off automatically.
 
-为什么用背景色做参考、不用画面中心块当"手套色":
-  - 手套不一定在正中央,取中心块容易取错参考色
-  - 更关键的是逻辑问题:如果拿"手套色"当参考,分割会把颜色不像手套的
-    像素排除掉 —— 污渍恰好就是这种像素,污渍检测器就永远找不到它,
-    反而会被破洞检测器误报成"破洞"(缺陷类型报错)
-  用背景色做参考后,污渍"不是背景色"会留在掩膜里,破洞"露出的正是
-  背景色"才会被当成破洞候选,这两个问题不用额外处理就自动解决了。
+Why the background colour is the reference, and not a centre patch taken
+as the "glove colour":
+  - the glove is not necessarily centred, so a centre patch easily picks
+    up the wrong reference colour;
+  - more importantly it is logically wrong: with a "glove colour"
+    reference, segmentation throws away every pixel that does not look
+    like the glove -- and a stain is exactly such a pixel. The stain
+    detector would then never see it, while the hole detector would
+    report it as a "hole" (wrong defect type).
+  With a background reference, a stain stays inside the mask because it
+  "is not the background colour", and a hole becomes a hole candidate
+  because what shows through it *is* the background colour. Both problems
+  disappear on their own, with no special-casing.
 """
 import cv2
 import numpy as np
 
-BORDER_RATIO = 0.06                          # 画面四边取多宽的一圈当背景采样区
-MIN_AREA_RATIO, MAX_AREA_RATIO = 0.05, 0.95  # 手套面积占比的合理范围
-CLOSE_KSIZE = 7   # 形态学闭运算核:补缝隙,大一点没关系
-OPEN_KSIZE = 3    # 形态学开运算核:去噪点,必须小 —— 用7的话会把撕裂的
-                  # 细缝也一起抹掉(实测发现的坑)
+BORDER_RATIO = 0.06                          # how wide a border strip to sample
+MIN_AREA_RATIO, MAX_AREA_RATIO = 0.05, 0.95  # plausible range for the glove area
+CLOSE_KSIZE = 7   # closing kernel: fills gaps, being generous is fine
+OPEN_KSIZE = 3    # opening kernel: removes speckles, must stay small -- at 7 it
+                  # also wipes out the thin sliver of a tear (found the hard way)
 
-# 色度差的 90 分位达到它,就只用 a/b 色度做分割,不看亮度 L。
-# 为什么要分两种:
-#   彩色背景(比如黄色垫子)+ 白手套时,亮度反而是干扰 —— 垫子上的阴影
-#   亮度差很大会被误判成手套,而真污渍亮度接近材料却掉到阈值以下。实测
-#   4 张白棉照片,改用纯色度后污渍被掩膜覆盖率从 2~3/4 升到 4/4。
-#   但灰手套配灰白背景时两者色度都接近中性,只能靠亮度区分,这时必须
-#   退回完整 Lab 距离。
+# Once the 90th percentile of the chroma difference reaches this, segment on the
+# a/b chroma alone and ignore lightness L.
+# Why there are two modes:
+#   With a coloured background (say a yellow mat) and a white glove, lightness
+#   is a liability -- shadows on the mat differ strongly in brightness and get
+#   taken for glove, while a real stain sits close to the material in lightness
+#   and falls under the threshold. Measured on 4 white-cotton photos, switching
+#   to pure chroma raised stain coverage inside the mask from 2-3/4 to 4/4.
+#   But a grey glove on a grey-white background is near-neutral in chroma on
+#   both sides and can only be told apart by lightness, so there we have to
+#   fall back to the full Lab distance.
 CHROMA_SEG_MIN_SPREAD = 12.0
 
 
 def get_background_color(img):
-    """取画面四条边框像素的颜色中位数(Lab 空间),当背景参考色。"""
+    """Median colour (in Lab) of the four image borders: the background reference."""
     lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB).astype(np.float32)
     h, w = lab.shape[:2]
     bh, bw = max(int(h * BORDER_RATIO), 1), max(int(w * BORDER_RATIO), 1)
@@ -45,16 +57,20 @@ def get_background_color(img):
 
 
 def segment_glove(img):
-    """返回 (mask_filled, mask_raw):
-    - mask_raw   : 手套实际像素(破洞处是黑的,因为破洞露出的是背景)
-    - mask_filled: 手套完整外轮廓填满(破洞也被填成白色)
-    两者相减 = "轮廓内、但颜色是背景色"的区域 -> 破洞候选。
+    """Return (mask_filled, mask_raw):
+    - mask_raw   : the glove's actual pixels (a hole is black there, because
+                   what shows through a hole is the background)
+    - mask_filled: the glove's outline filled in solid (holes turn white too)
+    The difference between them = "inside the outline but coloured like the
+    background" -> hole candidates.
     """
     bg_color = get_background_color(img)
     lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB).astype(np.float32)
 
-    # 每个像素跟背景色的距离,Otsu 自动找"多远算手套"的分界线。
-    # 背景本身有明显色相时只比色度,避免阴影/反光的亮度差干扰(见上面说明)。
+    # Distance from every pixel to the background colour; Otsu decides how far
+    # "far enough to be glove" is. When the background itself has a clear hue we
+    # compare chroma only, so brightness differences from shadows and highlights
+    # cannot interfere (see the note above).
     chroma = np.hypot(lab[:, :, 1] - bg_color[1], lab[:, :, 2] - bg_color[2])
     if float(np.percentile(chroma, 90)) >= CHROMA_SEG_MIN_SPREAD:
         dist = chroma
@@ -68,7 +84,7 @@ def segment_glove(img):
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_k)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, open_k)
 
-    # 只保留最大连通区域,并填满内部
+    # Keep only the largest connected region and fill its interior
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     mask_filled = np.zeros_like(mask)
     if contours:
@@ -80,16 +96,17 @@ def segment_glove(img):
 
 
 def glove_found(mask_filled):
-    """手套面积占比是否在合理范围;不合理就代表这张图没找到手套。
-    返回 (是否找到, 面积占比)。
+    """Whether the glove's area fraction is plausible; if it is not, no glove
+    was found in this image. Returns (found, area_fraction).
     """
     ratio = float(mask_filled.mean() / 255)
     return MIN_AREA_RATIO < ratio < MAX_AREA_RATIO, ratio
 
 
 def get_glove_color(img, mask_raw):
-    """手套正常颜色的参考色(Lab 中位数)。先把掩膜向内腐蚀,避开边缘上
-    "手套色和背景色混合"的像素。找不到手套像素时返回 None。
+    """Reference colour of the undamaged glove material (median in Lab). The
+    mask is eroded inwards first, to avoid the rim of pixels where glove and
+    background colours blend. Returns None when no glove pixels are found.
     """
     lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB).astype(np.float32)
     inner = cv2.erode(mask_raw, np.ones((9, 9), np.uint8)) > 0
