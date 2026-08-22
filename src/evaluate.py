@@ -16,7 +16,7 @@ Covers these assignment requirements:
 (ground truth comes from the folder names, so no boxes have to be drawn by hand)
 
     dataset/raw/
-      hole/                  <- defect name
+      tearing/               <- defect name
         cotton/     *.jpg    <- material name
         nitrile/    *.jpg
         latex_foam/ *.jpg
@@ -30,7 +30,7 @@ Covers these assignment requirements:
         cotton/     *.jpg
 
 Multiple labels can be joined with "+", for example
-``hole+thin/cotton/example.jpg``.
+``tearing+thin/cotton/example.jpg``.
 
 The folder-name to defect-name table is LABEL_MAP below.
 When you add a new detector, remember to add a line to LABEL_MAP.

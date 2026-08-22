@@ -87,10 +87,10 @@ annotation needed:
 ```
 dataset/raw/
 ├── latex/               latex gloves
-│   ├── hole/            hole photos (>= 5)
+│   ├── tearing/         tearing photos (>= 5)
 │   ├── open_tear/       open tear photos (>= 5)
 │   ├── stain/           stain photos (>= 5)
-│   ├── hole+stain/      an image with multiple defects, joined with +
+│   ├── tearing+stain/   an image with multiple defects, joined with +
 │   └── good/            clean/defect-free gloves (used to measure false positives)
 ├── rubber/              rubber gloves
 └── leather/             leather gloves
