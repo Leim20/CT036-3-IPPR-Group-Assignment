@@ -128,6 +128,11 @@ SPOTTING_MIN_COMPACTNESS = 0.30  # a dot should be a compact little blob; this
 # by the weave are only 11-15 away -- a factor of 8, so 40 leaves plenty of room
 # on both sides.
 SPOTTING_MIN_CHROMA_DEV = 40.0
+# On a neutral cotton glove, real orange marks measured 21-38 Lab chroma units
+# from the material.  The stronger 40-unit rule above remains appropriate for
+# coloured gloves; using this lower value only in the neutral-material branch
+# recovers the cotton marks without relaxing the coloured-background guard.
+SPOTTING_NEUTRAL_MIN_CHROMA_DEV = 20.0
 # The dot's colour must also *not* be the background colour. A little background
 # bleeds through at the glove's edge, and in the coloured branch that also
 # satisfies "hue deviates from the glove's main colour". Measured, those false
@@ -2715,7 +2720,8 @@ def _find_spots(img, mask_filled, mask_raw, bg_color):
     material_lab = np.median(lab_img[inside], axis=0)
 
     colorful = inside & (sat >= STAIN_COLOR_S_MIN) & (val >= STAIN_COLOR_V_MIN)
-    if colorful.sum() < inside.sum() * STAIN_NEUTRAL_RATIO:
+    neutral_material = colorful.sum() < inside.sum() * STAIN_NEUTRAL_RATIO
+    if neutral_material:
         deviation = np.hypot(lab_img[:, :, 1] - material_lab[1],
                              lab_img[:, :, 2] - material_lab[2])
         candidate = inside & (deviation >= STAIN_NEUTRAL_CHROMA_DIST)
@@ -2766,7 +2772,12 @@ def _find_spots(img, mask_filled, mask_raw, bg_color):
             lab_img[pixels, 1] - material_lab[1],
             lab_img[pixels, 2] - material_lab[2],
         )))
-        if deviation < SPOTTING_MIN_CHROMA_DEV:
+        min_chroma_deviation = (
+            SPOTTING_NEUTRAL_MIN_CHROMA_DEV
+            if neutral_material
+            else SPOTTING_MIN_CHROMA_DEV
+        )
+        if deviation < min_chroma_deviation:
             continue      # too faint: most likely material texture, not a splash
         bg_distance = float(np.median(np.hypot(
             lab_img[pixels, 1] - bg_color[1],

@@ -145,6 +145,13 @@ BG_HUE_MIN_LSTD = 10.0
 # the mask obtained without it. Guards the case where backdrop hue and glove
 # hue coincide and the key deletes the glove instead of the background.
 BG_KEY_MIN_KEEP = 0.55
+# A coloured backdrop key is also a cleaner background sample when the glove
+# itself touches much of the image border.  In that case the ordinary border
+# modes can accidentally learn the glove colour as "background" and collapse
+# the mask.  Only attempt the keyed rescue for a suspiciously small mask, and
+# only accept a large, still-plausible recovery.
+BG_KEY_RESCUE_TRIGGER = 0.10
+BG_KEY_RESCUE_MIN_GAIN = 1.50
 
 # --- Texture: measured, and deliberately NOT used ----------------------
 # Texture separates glove from backdrop cleanly on paper -- local standard
@@ -514,6 +521,33 @@ def segment_glove(img):
         if keyed_area < BG_KEY_MIN_KEEP * plain_area or keyed_area < MIN_AREA_RATIO:
             bg_key = np.zeros_like(bg_key)
             mask_filled, mask_raw = plain_filled, plain_raw
+
+    # If a glove occupies the border, the border histogram can contain a large
+    # glove-colour mode.  A strong hue key already identifies the coloured
+    # backdrop independently of brightness, so use those keyed pixels as a
+    # detector-free background sample when the first mask has collapsed.  This
+    # remains ordinary histogram thresholding; no learned model is involved.
+    current_area = mask_filled.mean() / 255
+    if bg_key.any() and current_area < BG_KEY_RESCUE_TRIGGER:
+        keyed_pixels = lab[bg_key > 0]
+        if len(keyed_pixels) >= 500:
+            keyed_colors = _modes_of(
+                keyed_pixels,
+                BG_MODES,
+                BG_QUANT,
+                BG_MIN_MODE_RATIO,
+                BG_MODE_MIN_SEP,
+            )
+            rescued_filled, rescued_raw = _threshold_against(
+                lab, keyed_colors, skin, bg_key,
+            )
+            rescued_area = rescued_filled.mean() / 255
+            if (
+                MIN_AREA_RATIO < rescued_area < MAX_AREA_RATIO
+                and rescued_area >= current_area * BG_KEY_RESCUE_MIN_GAIN
+            ):
+                bg_colors = keyed_colors
+                mask_filled, mask_raw = rescued_filled, rescued_raw
 
     rng = np.random.default_rng(0)     # fixed seed: segmentation stays reproducible
     for _ in range(max(BG_REFINE_ITERS - 1, 0)):
