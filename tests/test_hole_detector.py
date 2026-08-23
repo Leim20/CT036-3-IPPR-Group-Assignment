@@ -50,6 +50,41 @@ class TearingDetectorTests(unittest.TestCase):
         )
         self.assertEqual([], result)
 
+    def test_large_deep_low_contrast_cotton_tear_is_retained(self):
+        image = np.full((500, 500, 3), self.BACKGROUND, dtype=np.uint8)
+        mask = np.zeros((500, 500), dtype=np.uint8)
+        cv2.rectangle(mask, (50, 50), (450, 450), 255, cv2.FILLED)
+        image[mask > 0] = (210, 210, 210)
+        # Passes the skin-colour rule but sits below cotton's normal 50-point
+        # local-contrast threshold, matching the large photographed palm tear.
+        cv2.circle(image, (250, 220), 60, (160, 160, 210), cv2.FILLED)
+        bg_color = cv2.cvtColor(
+            image, cv2.COLOR_BGR2LAB
+        ).astype(np.float32)[0, 0]
+
+        result = detect_tearing(
+            image, mask, mask, bg_color, img_plain=image, material="cotton"
+        )
+
+        self.assertEqual(1, len(result))
+        self.assertGreater(cv2.countNonZero(result[0].mask), 10000)
+
+    def test_small_low_contrast_cotton_patch_stays_rejected(self):
+        image = np.full((500, 500, 3), self.BACKGROUND, dtype=np.uint8)
+        mask = np.zeros((500, 500), dtype=np.uint8)
+        cv2.rectangle(mask, (50, 50), (450, 450), 255, cv2.FILLED)
+        image[mask > 0] = (210, 210, 210)
+        cv2.circle(image, (250, 220), 15, (160, 160, 210), cv2.FILLED)
+        bg_color = cv2.cvtColor(
+            image, cv2.COLOR_BGR2LAB
+        ).astype(np.float32)[0, 0]
+
+        result = detect_tearing(
+            image, mask, mask, bg_color, img_plain=image, material="cotton"
+        )
+
+        self.assertEqual([], result)
+
 
 if __name__ == "__main__":
     unittest.main()

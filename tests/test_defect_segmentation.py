@@ -41,7 +41,7 @@ class DefectSegmentationTests(unittest.TestCase):
         self.assertGreater(masks[0][200, 200], 0)
         self.assertEqual(0, masks[0][100, 100])
 
-    def test_completely_missing_finger_uses_box_fallback(self):
+    def test_completely_missing_finger_colours_estimated_hull_gap(self):
         image = np.full((500, 500, 3), self.BACKGROUND, np.uint8)
         glove = np.zeros((500, 500), np.uint8)
         cv2.rectangle(glove, (100, 240), (400, 450), 255, cv2.FILLED)
@@ -59,7 +59,11 @@ class DefectSegmentationTests(unittest.TestCase):
             material="latex_foam",
         )
 
-        self.assertEqual(0, cv2.countNonZero(masks[0]))
+        self.assertGreater(cv2.countNonZero(masks[0]), 0)
+        self.assertGreater(masks[0][100, 250], 0)
+        self.assertEqual(
+            0, cv2.countNonZero(cv2.bitwise_and(masks[0], glove))
+        )
 
     def test_visible_curled_finger_colours_the_finger_material(self):
         image = np.full((500, 500, 3), self.BACKGROUND, np.uint8)
@@ -99,6 +103,16 @@ class DefectSegmentationTests(unittest.TestCase):
 
         self.assertGreater(masks[0][200, 275], 0)
         self.assertEqual(0, masks[0][100, 180])
+        visible_short_finger = np.zeros_like(glove)
+        cv2.rectangle(
+            visible_short_finger, (250, 160), (300, 270), 255, cv2.FILLED
+        )
+        recovered = cv2.countNonZero(
+            cv2.bitwise_and(masks[0], visible_short_finger)
+        )
+        self.assertGreater(
+            recovered / cv2.countNonZero(visible_short_finger), 0.80
+        )
 
     def test_thin_mask_marks_pale_patch_not_opaque_glove(self):
         image = np.full((420, 520, 3), self.BACKGROUND, np.uint8)

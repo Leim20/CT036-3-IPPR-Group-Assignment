@@ -1085,6 +1085,10 @@ class GloveDefectApp:
                     f"evidence={region_evidence:.1f}/100 | "
                     f"box x={x}, y={y}, w={w}, h={h}"
                 )
+            if mode == "Tearing":
+                lines.append(
+                    "Tearing mode checks both enclosed and open/fingertip geometry."
+                )
         elif mode != ALL_DETECTORS_LABEL:
             lines.append(
                 f"Only the {mode} detector was run; this is not a full glove inspection."

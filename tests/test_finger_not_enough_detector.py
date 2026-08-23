@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from defect_detection import affected_area_percentage, detect_finger_not_enough
+from pipeline import process_image
 
 
 class FingerNotEnoughDetectorTests(unittest.TestCase):
@@ -178,6 +179,27 @@ class FingerNotEnoughDetectorTests(unittest.TestCase):
         self.assertEqual(1, len(result))
         self.assertEqual("Finger Not Enough", result[0].name)
         self.assertGreater(result[0].evidence, 0.0)
+
+    def test_real_folded_finger_regressions_do_not_require_exact_counts(self):
+        cases = (
+            "finger_not_enough/cotton/white_cotton_011.jpg",
+            "finger_not_enough/latex_foam/latex_foam_010.jpg",
+            "finger_not_enough/latex_foam/latex_foam_018.jpg",
+        )
+        for relative_path in cases:
+            with self.subTest(image=relative_path):
+                result = process_image(
+                    str(ROOT / "dataset" / "raw" / relative_path),
+                    detectors=[detect_finger_not_enough],
+                )
+                detections = [
+                    item for item in result["defects"]
+                    if item.name == "Finger Not Enough"
+                ]
+                self.assertTrue(detections)
+                self.assertTrue(
+                    any(cv2.countNonZero(item.mask) > 0 for item in detections)
+                )
 
 
 if __name__ == "__main__":

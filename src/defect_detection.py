@@ -221,6 +221,18 @@ TEARING_MATERIAL_RULES = {
     },
 }
 
+# Cotton fibres lower the *mean* Lab difference around a large opening because
+# the surrounding ring contains a mixture of white yarn, shadow and exposed
+# skin.  A second, deliberately narrow rule therefore accepts only candidates
+# that are simultaneously large and deep inside the glove.  Measurements on
+# the current development photographs separate the nearest clean-glove region
+# (area ratio 0.0045) from the first low-contrast tear (0.0093); 0.008 leaves a
+# margin between them.  The depth and contrast backstops keep broad illumination
+# changes from satisfying the size rule on their own.
+TEARING_COTTON_LARGE_MIN_AREA_RATIO = 0.008
+TEARING_COTTON_LARGE_MIN_LOCAL_CONTRAST = 30.0
+TEARING_COTTON_LARGE_MIN_INTERIOR_RATIO = 0.70
+
 # Broad, lighting-tolerant skin ranges in YCrCb and HSV. Requiring both rules
 # avoids accepting blue glove highlights that happen to satisfy only one space.
 SKIN_Y_MIN = 30
@@ -293,6 +305,45 @@ FINGER_NOT_ENOUGH_MATERIAL_RULES = {
         "skin_max_width_ratio": 0.30,
         "skin_min_boundary_ratio": 0.05,
         "skin_max_y_ratio": 0.72,
+    },
+}
+
+# Silhouette support for a folded/short finger.  Exact indentation counts were
+# brittle: both good and defective gloves commonly produced four hull gaps.
+# The replacement first counts prominent upper-contour tips, then requires a
+# second abnormality before reporting a shortage.  The supporting abnormality
+# is material-specific because flexible cotton, foam latex and nitrile produce
+# different hull-gap sizes when a finger folds into the palm.
+FINGER_EXPECTED_TIP_COUNT = 5
+FINGER_TIP_MAX_Y_RATIO = 0.48
+FINGER_TIP_MIN_RADIUS_RATIO = 0.20
+FINGER_TIP_MIN_PROMINENCE_RATIO = 0.015
+FINGER_TIP_SMOOTH_SIGMA_RATIO = 0.002
+FINGER_TIP_NEIGHBOUR_RATIO = 0.025
+FINGER_SHAPE_DEFAULT_RULE = {
+    "min_indent_count": 2,
+    "large_gap_area_ratio": 0.06,
+    "max_solidity": 0.76,
+    "support_indent_counts": (3,),
+}
+FINGER_SHAPE_MATERIAL_RULES = {
+    "cotton": {
+        "min_indent_count": 2,
+        "large_gap_area_ratio": 0.08,
+        "max_solidity": 0.70,
+        "support_indent_counts": (),
+    },
+    "latex_foam": {
+        "min_indent_count": 2,
+        "large_gap_area_ratio": 0.065,
+        "max_solidity": 0.76,
+        "support_indent_counts": (3,),
+    },
+    "nitrile": {
+        "min_indent_count": 2,
+        "large_gap_area_ratio": 0.05,
+        "max_solidity": 0.80,
+        "support_indent_counts": (2,),
     },
 }
 FINGER_REGION_HEIGHT_RATIO = 0.80
@@ -489,6 +540,7 @@ def detect_tearing(img, mask_filled, mask_raw, bg_color,
         (mask_filled > 0).astype(np.uint8), cv2.DIST_L2, 5
     )
     max_interior_distance = max(float(interior_distance.max()), 1.0)
+    glove_area = max(int(cv2.countNonZero(mask_filled)), 1)
 
     results = []
     for label in range(1, count):
@@ -509,13 +561,23 @@ def detect_tearing(img, mask_filled, mask_raw, bg_color,
                 lab[component > 0].mean(axis=0) - lab[ring_pixels].mean(axis=0)
             )
         )
-        if local_contrast < rule["min_local_contrast"]:
-            continue
-
         interior_ratio = float(
             interior_distance[component > 0].max() / max_interior_distance
         )
-        if interior_ratio < rule["min_interior_ratio"]:
+        area_ratio = float(area) / glove_area
+        standard_candidate = (
+            local_contrast >= rule["min_local_contrast"]
+            and interior_ratio >= rule["min_interior_ratio"]
+        )
+        large_cotton_candidate = (
+            material == "cotton"
+            and area_ratio >= TEARING_COTTON_LARGE_MIN_AREA_RATIO
+            and local_contrast
+            >= TEARING_COTTON_LARGE_MIN_LOCAL_CONTRAST
+            and interior_ratio
+            >= TEARING_COTTON_LARGE_MIN_INTERIOR_RATIO
+        )
+        if not (standard_candidate or large_cotton_candidate):
             continue
 
         x = int(stats[label, cv2.CC_STAT_LEFT])
@@ -523,9 +585,14 @@ def detect_tearing(img, mask_filled, mask_raw, bg_color,
         width = int(stats[label, cv2.CC_STAT_WIDTH])
         height = int(stats[label, cv2.CC_STAT_HEIGHT])
         area_fit = min(1.0, area / max(4.0 * rule["min_area"], 1.0))
+        contrast_reference = (
+            TEARING_COTTON_LARGE_MIN_LOCAL_CONTRAST
+            if large_cotton_candidate and not standard_candidate
+            else rule["min_local_contrast"]
+        )
         contrast_fit = min(
             1.0,
-            local_contrast / max(2.0 * rule["min_local_contrast"], 1.0),
+            local_contrast / max(2.0 * contrast_reference, 1.0),
         )
         depth_fit = min(
             1.0,
@@ -650,6 +717,108 @@ def detect_open_tears(img, mask_filled, mask_raw, bg_color,
 # ============================================================
 # Defect 3: finger not enough
 # ============================================================
+def _count_extended_fingertips(mask_filled, glove_box):
+    """Count prominent upper-contour tips around the palm centre.
+
+    The contour is kept in traversal order rather than reduced to a convex
+    hull.  Consequently two adjacent fingers can still form two radial peaks
+    even when one is shorter and hidden behind the other's angular direction.
+    All distances, smoothing and prominence gates are normalised by glove size.
+    """
+    contours, _ = cv2.findContours(
+        mask_filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
+    )
+    if not contours:
+        return 0
+
+    contour = max(contours, key=cv2.contourArea)
+    points = contour[:, 0, :]
+    if len(points) < 5:
+        return 0
+
+    x, y0, width, height = glove_box
+    scale = float(max(width, height, 1))
+    distance = cv2.distanceTransform(
+        (mask_filled > 0).astype(np.uint8), cv2.DIST_L2, 5
+    )
+
+    # The widest point in the middle of an upright glove is a stable palm
+    # centre.  Excluding the upper fingers and lower cuff prevents either from
+    # becoming the radial origin.
+    search_top = min(
+        mask_filled.shape[0] - 1, y0 + int(round(0.30 * height))
+    )
+    search_bottom = min(
+        mask_filled.shape[0], y0 + max(1, int(round(0.78 * height)))
+    )
+    search_left = min(mask_filled.shape[1] - 1, max(0, x))
+    search_right = min(mask_filled.shape[1], x + max(width, 1))
+    palm_roi = distance[
+        search_top:search_bottom, search_left:search_right
+    ]
+    if palm_roi.size == 0 or float(palm_roi.max()) <= 0.0:
+        return 0
+    _, _, _, palm_location = cv2.minMaxLoc(palm_roi)
+    palm_x = search_left + int(palm_location[0])
+    palm_y = search_top + int(palm_location[1])
+
+    radial = np.hypot(
+        points[:, 0].astype(np.float32) - palm_x,
+        points[:, 1].astype(np.float32) - palm_y,
+    ).astype(np.float32)
+    point_count = len(radial)
+    sigma = max(2.0, point_count * FINGER_TIP_SMOOTH_SIGMA_RATIO)
+    tiled = np.concatenate([radial, radial, radial]).reshape(1, -1)
+    smoothed_all = cv2.GaussianBlur(tiled, (0, 0), sigma).ravel()
+    smoothed = smoothed_all[point_count:2 * point_count]
+
+    neighbour = max(
+        10, int(round(point_count * FINGER_TIP_NEIGHBOUR_RATIO))
+    )
+    local_max_all = cv2.dilate(
+        smoothed_all.reshape(1, -1),
+        np.ones((1, 2 * neighbour + 1), np.uint8),
+    ).ravel()
+    local_max = local_max_all[point_count:2 * point_count]
+    candidate_indices = np.flatnonzero(smoothed >= local_max - 1e-4)
+
+    maximum_tip_y = y0 + FINGER_TIP_MAX_Y_RATIO * height
+    minimum_radius = FINGER_TIP_MIN_RADIUS_RATIO * scale
+    minimum_prominence = FINGER_TIP_MIN_PROMINENCE_RATIO * scale
+    candidates = []
+    for index in candidate_indices:
+        point_x, point_y = points[index]
+        if point_y > maximum_tip_y or smoothed[index] < minimum_radius:
+            continue
+        centre = point_count + int(index)
+        left_min = float(
+            smoothed_all[centre - 2 * neighbour:centre].min()
+        )
+        right_min = float(
+            smoothed_all[centre + 1:centre + 2 * neighbour + 1].min()
+        )
+        prominence = float(smoothed[index] - max(left_min, right_min))
+        if prominence >= minimum_prominence:
+            candidates.append((int(index), float(smoothed[index])))
+
+    # A rounded fingertip can produce a short plateau of equal maxima. Merge
+    # neighbouring plateau samples into one physical tip, including the contour
+    # wrap between its first and last array entries.
+    peaks = []
+    for candidate in candidates:
+        if not peaks or candidate[0] - peaks[-1][0] > neighbour:
+            peaks.append(candidate)
+        elif candidate[1] > peaks[-1][1]:
+            peaks[-1] = candidate
+    if (
+        len(peaks) > 1
+        and peaks[0][0] + point_count - peaks[-1][0] <= neighbour
+    ):
+        keep = peaks[0] if peaks[0][1] >= peaks[-1][1] else peaks[-1]
+        peaks = peaks[1:-1] + [keep]
+    return min(len(peaks), 6)
+
+
 def detect_finger_not_enough(img, mask_filled, mask_raw, bg_color,
                              img_plain=None, material=None):
     """Detect a shortened, hidden, or absent glove finger.
@@ -665,10 +834,10 @@ def detect_finger_not_enough(img, mask_filled, mask_raw, bg_color,
        segmentation can otherwise discard every bare finger on cotton gloves.
        Each accepted component becomes its own detection region. A weaker skin
        component still needs support from a missing finger column.
-    2. Convex-hull indentation count describes the missing space between the
-       remaining finger shapes.
-    3. The number of persistent foreground runs across upper rows describes
-       how many separate finger columns are visible.
+    2. Prominent radial peaks along the ordered upper contour count extended
+       fingertips without requiring every finger to have the same length.
+    3. Convex-hull gap size, silhouette solidity and persistent upper-row runs
+       support the tip shortage so one noisy contour cue cannot decide alone.
 
     A curled or folded finger that leaves a visible empty space is deliberately
     accepted as this defect, even when the physical finger is still attached.
@@ -743,6 +912,9 @@ def detect_finger_not_enough(img, mask_filled, mask_raw, bg_color,
     rule = FINGER_NOT_ENOUGH_MATERIAL_RULES.get(
         material_key, FINGER_NOT_ENOUGH_DEFAULT_RULE
     )
+    shape_rule = FINGER_SHAPE_MATERIAL_RULES.get(
+        material_key, FINGER_SHAPE_DEFAULT_RULE
+    )
 
     # Count sizeable gaps between the glove and its convex hull. Only gaps in
     # the upper part of the glove are relevant; cuff/wrist gaps are ignored.
@@ -761,6 +933,7 @@ def detect_finger_not_enough(img, mask_filled, mask_raw, bg_color,
     indentation_strengths = []
     largest_indentation_box = None
     largest_indentation_area = -1
+    largest_indentation_area_ratio = 0.0
     for label in range(1, indent_count):
         component_area_ratio = (
             float(indent_stats[label, cv2.CC_STAT_AREA]) / hull_area
@@ -795,6 +968,9 @@ def detect_finger_not_enough(img, mask_filled, mask_raw, bg_color,
             )
             indentation_strengths.append(
                 0.50 * area_fit + 0.25 * width_fit + 0.25 * vertical_fit
+            )
+            largest_indentation_area_ratio = max(
+                largest_indentation_area_ratio, component_area_ratio
             )
             component_area = int(indent_stats[label, cv2.CC_STAT_AREA])
             if component_area > largest_indentation_area:
@@ -840,6 +1016,27 @@ def detect_finger_not_enough(img, mask_filled, mask_raw, bg_color,
         if run_histogram[run_count:].sum() >= minimum_support_rows:
             persistent_run_count = run_count
             break
+
+    fingertip_count = _count_extended_fingertips(
+        mask_filled, (x, y0, width, height)
+    )
+    missing_column = (
+        0 < fingertip_count < FINGER_EXPECTED_TIP_COUNT
+    )
+    glove_solidity = (
+        float(cv2.countNonZero(mask_filled)) / max(hull_area, 1)
+    )
+    shape_support = (
+        qualifying_indentations >= shape_rule["min_indent_count"]
+        and (
+            largest_indentation_area_ratio
+            >= shape_rule["large_gap_area_ratio"]
+            or glove_solidity <= shape_rule["max_solidity"]
+            or qualifying_indentations
+            in shape_rule["support_indent_counts"]
+        )
+    )
+    missing_space = missing_column and shape_support
 
     # Use the original (non-lighting-normalised) colour for skin evidence.  Do
     # not intersect it with ``mask_filled`` here: on strongly coloured cotton,
@@ -1008,19 +1205,30 @@ def detect_finger_not_enough(img, mask_filled, mask_raw, bg_color,
             component_is_exposed_tip,
             candidate_strength,
         ))
-    missing_space = (
-        qualifying_indentations == rule["indent_target_count"]
+    tip_shortage_strength = (
+        np.clip(
+            (FINGER_EXPECTED_TIP_COUNT - fingertip_count)
+            / max(FINGER_EXPECTED_TIP_COUNT - 1, 1),
+            0.0,
+            1.0,
+        )
+        if missing_column else 0.0
     )
-    missing_column = persistent_run_count == rule["row_target_count"]
-    row_support = float(run_histogram[rule["row_target_count"]:].sum())
-    row_strength = (
-        min(1.0, row_support / max(2.0 * minimum_support_rows, 1.0))
-        if missing_column
-        else 0.0
+    row_shortage_strength = (
+        np.clip(
+            (FINGER_EXPECTED_TIP_COUNT - persistent_run_count)
+            / max(FINGER_EXPECTED_TIP_COUNT - 1, 1),
+            0.0,
+            1.0,
+        )
+        if missing_column else 0.0
+    )
+    silhouette_shortage_strength = (
+        0.80 * tip_shortage_strength + 0.20 * row_shortage_strength
     )
     accepted_skin = [
         record for record in skin_records
-        if record[2] or missing_column
+        if record[2] or missing_space
     ]
     if accepted_skin:
         results = []
@@ -1028,7 +1236,7 @@ def detect_finger_not_enough(img, mask_filled, mask_raw, bg_color,
             skin_shape_strength = (
                 0.70 * strength + 0.30
                 if is_tip
-                else 0.60 * strength + 0.40 * row_strength
+                else 0.60 * strength + 0.40 * silhouette_shortage_strength
             )
             evidence = 50.0 + 50.0 * skin_shape_strength
             results.append(Detection(
@@ -1046,7 +1254,9 @@ def detect_finger_not_enough(img, mask_filled, mask_raw, bg_color,
         float(np.mean(indentation_strengths))
         if indentation_strengths else 0.0
     )
-    evidence = 50.0 + 50.0 * indentation_strength
+    evidence = 50.0 + 50.0 * (
+        0.65 * indentation_strength + 0.35 * silhouette_shortage_strength
+    )
 
     # Localise the evidence for the display stage. Exposed skin is already a
     # real pixel region; otherwise the largest abnormal hull gap is the best
@@ -2203,9 +2413,10 @@ def _segment_hull_gap(mask_filled, box):
 def _visible_short_finger(mask_filled, gap_component):
     """Find a glove-covered short finger protruding into a missing-space gap.
 
-    The dilated gap touches the fingers on both sides. Removing the lower gap
-    closure separates those contacts; an interior contact (not the two outside
-    walls) is evidence of a curled/shortened finger still physically present.
+    The dilated gap touches the fingers on both sides. Restricting it to the
+    gap's inner corridor separates those walls; an interior contact is evidence
+    of a curled/shortened finger still physically present. The corridor extends
+    slightly below the gap so the recovered mask includes the finger base.
     """
     gap_u8 = (gap_component > 0).astype(np.uint8) * 255
     points = cv2.findNonZero(gap_u8)
@@ -2224,7 +2435,7 @@ def _visible_short_finger(mask_filled, gap_component):
     )
     search = np.zeros_like(mask_filled)
     search_bottom = min(
-        mask_filled.shape[0], gap_y + max(1, round(0.90 * gap_height))
+        mask_filled.shape[0], gap_y + max(1, round(1.10 * gap_height))
     )
     side_margin = max(2, round(0.10 * gap_width))
     search[
@@ -2247,17 +2458,51 @@ def _visible_short_finger(mask_filled, gap_component):
 
     _, selected_label = max(candidates)
     selected_contact = (labels == selected_label).astype(np.uint8) * 255
-    # Grow inward from the detected boundary contact to colour the finger's
-    # material, while intersection with the glove mask prevents background fill.
-    grown = cv2.dilate(
-        selected_contact,
-        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (51, 51)),
+
+    # Recover the complete visible short/folded finger rather than painting a
+    # fixed-radius patch around its boundary.  The gap's inner corridor excludes
+    # the two neighbouring full-length fingers and limits spill into the palm.
+    # Connected-component growth within that constrained material region is the
+    # morphological equivalent of geodesic dilation to stability, but completes
+    # in one pass regardless of finger length.
+    allowed = cv2.bitwise_and(mask_filled, search)
+    allowed_count, allowed_labels, _, _ = cv2.connectedComponentsWithStats(
+        (allowed > 0).astype(np.uint8), 8
     )
-    return cv2.bitwise_and(grown, mask_filled)
+    best_allowed_label = None
+    best_overlap = 0
+    for label in range(1, allowed_count):
+        overlap = int(np.count_nonzero(
+            (allowed_labels == label) & (selected_contact > 0)
+        ))
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_allowed_label = label
+
+    if best_allowed_label is not None:
+        grown = (allowed_labels == best_allowed_label).astype(np.uint8) * 255
+        grown = cv2.morphologyEx(
+            grown, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8)
+        )
+        return cv2.bitwise_and(grown, mask_filled)
+
+    # Degenerate one-pixel contacts can disappear from the constrained mask.
+    # Retain the old local fallback so a recognised defect never loses all of
+    # its visible evidence because of that numerical edge case.
+    local = cv2.dilate(
+        selected_contact,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (21, 21)),
+    )
+    return cv2.bitwise_and(local, mask_filled)
 
 
 def _segment_finger_not_enough(source, mask_filled, box, material):
-    """Colour a visible short finger; leave true absence for box fallback."""
+    """Colour a visible short finger or the estimated missing-space region.
+
+    Exposed-skin detections already carry their validated component mask from
+    recognition and never enter this helper.  Re-running broad skin thresholding
+    here used to colour unrelated wrist/forearm pixels inside a geometry box.
+    """
     contours, _ = cv2.findContours(
         mask_filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
     )
@@ -2304,27 +2549,20 @@ def _segment_finger_not_enough(source, mask_filled, box, material):
             best_label = label
             best_area = area
 
-    segmented = np.zeros_like(mask_filled)
+    if best_label is None:
+        return np.zeros_like(mask_filled)
 
-    # Recognition has already validated and tightly boxed an exposed finger.
-    # Re-segment skin without clipping it to the material mask: on cotton the
-    # bare finger can sit immediately outside ``mask_filled``.
-    skin = _skin_colour_mask(source)
-    skin = cv2.morphologyEx(
-        skin, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)
-    )
-    skin = cv2.morphologyEx(
-        skin, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8)
-    )
-    segmented = cv2.bitwise_and(skin, box_mask)
+    gap_component = (labels == best_label).astype(np.uint8) * 255
+    visible = _visible_short_finger(mask_filled, labels == best_label)
+    visible_area = int(cv2.countNonZero(visible))
+    gap_area = max(int(cv2.countNonZero(gap_component)), 1)
+    if visible_area >= max(20, round(0.25 * gap_area)):
+        return visible
 
-    if cv2.countNonZero(segmented) == 0 and best_label is not None:
-        segmented = _visible_short_finger(
-            mask_filled, labels == best_label
-        )
-    # An all-zero mask is intentional for a completely absent finger. The
-    # drawing function then uses the detector's localised missing-space box.
-    return segmented
+    # No trustworthy material protrusion remains: represent the inferred area
+    # that the missing/folded finger should occupy.  It is clipped to the
+    # recognised box so unrelated hull gaps cannot enter the affected-area mask.
+    return cv2.bitwise_and(gap_component, box_mask)
 
 
 def _segment_thin_area(source, mask_filled, box, material):
