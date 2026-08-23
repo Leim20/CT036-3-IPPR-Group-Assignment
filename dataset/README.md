@@ -3,6 +3,11 @@
 The assignment requires roughly 60 self-collected photos, spread across
 **>= 3 materials**, with **>= 5 photos per defect**.
 
+The source-code repository intentionally contains no dataset photographs.
+The dataset is distributed as a separate archive. After receiving it, extract
+the archive so that the photographs appear under `dataset/raw/` before running
+the GUI, self-test, evaluation script, or image-dependent regression tests.
+
 ## Directory structure (the folder name IS the ground truth, no manual bounding-box annotation needed)
 
 ```
@@ -33,13 +38,14 @@ detector**, or the evaluation script won't recognise the folder.
 Also deliberately take some photos under different lighting/angles, to
 demonstrate the system's robustness (this earns extra marks in the report).
 
-## Downscale images before committing to Git
+## Keep dataset photographs out of Git
 
 A single phone photo can be 3-5 MB; 60 of them adds up to 200-300 MB,
-which bloats the repo and makes cloning slow. Downscale everything to
-roughly **1600px on the long edge** before committing -- the system
-already resizes to an 800px width for processing, so this costs no
-detection accuracy.
+which bloats the repository and makes cloning slow. Do not commit photographs
+under `dataset/raw/`; `.gitignore` excludes them while retaining the empty
+folder structure. Share the dataset archive separately from the source-code
+ZIP. If storage size matters, photographs may be downscaled to roughly
+**1600px on the long edge** because the application resizes them for processing.
 
 ## Files auto-generated in this directory (not tracked in version control)
 
