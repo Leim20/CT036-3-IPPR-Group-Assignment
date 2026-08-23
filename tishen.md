@@ -8,9 +8,10 @@ My three defects, all implemented and merged into the team's system:
 | `detect_damage_by_fold` | a crease left where the glove was folded | 7/7 |
 | `detect_improper_roll` | the cuff is rolled or bunched, not lying flat | 8/8 |
 
-Plus `detect_side_tear`, written when tearing was still mine and kept because it works,
-though it is no longer one of my three. All of them rest on the **segmentation /
-background removal** work below.
+`detect_side_tear` was removed from the runtime, GUI, and evaluator because it caused
+too many false positives. The later sections retain its implementation history only;
+lateral tears now belong to the existing **Open Tear** class. The remaining detectors
+rest on the **segmentation / background removal** work below.
 
 > Note for the team: `DEFECT_ASSIGNMENT_PLAN.md` still puts improper roll on its
 > *excluded* list ("needs fine-grained edge geometry modelling, false-positive rate
@@ -37,7 +38,6 @@ photo
   ├─ defect_detection.py ──── detect_holes               (Member A)
   │                           detect_incomplete_beading  ← MINE
   │                           detect_damage_by_fold      ← MINE
-  │                           detect_side_tear           ← MINE (out of scope)
   │                           detect_open_tears          (Member A)
   │                           detect_stains              (Member B)
   │                           deduplicate()        IoU > 0.5, registration order wins

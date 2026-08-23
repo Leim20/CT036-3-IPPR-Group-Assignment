@@ -56,14 +56,16 @@ LABEL_MAP = {
     "tear": "Open Tear",
     "open_tear": "Open Tear",
     "fingertip_tear": "Open Tear",
-    "side_tear": "Side Tear",
+    # Legacy dataset names remain valid after the noisy dedicated side-tear
+    # detector was removed; lateral edge tears belong to Open Tear.
+    "side_tear": "Open Tear",
     "incomplete_beading": "Incomplete Beading",
     "beading": "Incomplete Beading",
     "damage_by_fold": "Damage By Fold",
     "fold": "Damage By Fold",
     "improper_roll": "Improper Roll",
     "roll": "Improper Roll",
-    "edge_tear": "Side Tear",
+    "edge_tear": "Open Tear",
     "stain": "Stain",
     "dirty": "Stain",
     "finger_not_enough": "Finger Not Enough",
