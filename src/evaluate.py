@@ -61,6 +61,8 @@ LABEL_MAP = {
     "beading": "Incomplete Beading",
     "damage_by_fold": "Damage By Fold",
     "fold": "Damage By Fold",
+    "improper_roll": "Improper Roll",
+    "roll": "Improper Roll",
     "edge_tear": "Side Tear",
     "stain": "Stain",
     "dirty": "Stain",

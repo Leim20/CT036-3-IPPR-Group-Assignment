@@ -1325,6 +1325,104 @@ def detect_damage_by_fold(img, mask_filled, mask_raw, bg_color,
     return [("Damage By Fold", tuple(m)) for m in merged[:FOLD_MAX_BOXES]]
 
 
+
+# ============================================================
+# Improper roll: the cuff is rolled or bunched instead of lying flat
+# ============================================================
+# The opposite of incomplete beading. Beading is a GAP in the hem;
+# improper roll is EXCESS material, rolled or twisted into a thick uneven
+# band at the wrist.
+#
+# Two independent signatures, both physical rather than fitted:
+#
+#   * A flat cuff sits in the shadow of the wrist and reads DARKER than
+#     the palm. A rolled cuff bulges towards the camera, catches the light
+#     along its ridge, and stops being darker. Measured as the lightness
+#     of the palm band minus the lightness of the cuff band:
+#         improper roll   -27 .. 11
+#         normal cuff      10 .. 34
+#
+#   * A properly worn cuff ends in an edge roughly PERPENDICULAR to the
+#     glove's major axis. A rolled one is tilted:
+#         improper roll   0.4 .. 86.2 degrees off perpendicular
+#         normal cuff     0.3 ..  4.5
+#
+# Either one alone is enough, so the two are OR'd: a roll that happens to
+# sit square to the axis is still caught by its brightness, and a roll on
+# a glove whose cuff is naturally pale is still caught by its angle.
+ROLL_CUFF_BAND = (0.80, 0.98)   # the cuff, as a fraction along the major axis
+ROLL_PALM_BAND = (0.40, 0.65)   # the palm, used as the brightness reference
+ROLL_EDGE_BAND = 0.96           # terminal edge = beyond this fraction
+ROLL_DARK_MAX = 12.0            # cuff lighter than this margin below the palm -> rolled
+ROLL_EDGE_ANGLE_MIN = 8.0       # cuff edge tilted more than this off perpendicular -> rolled
+ROLL_MIN_BAND_PX = 40           # too little cuff visible to judge
+
+
+def _axis_fraction(mask_filled, axis, perp, lo, hi, low_is_distal):
+    """Every mask pixel's position along the major axis, 0 = fingertips."""
+    ys, xs = np.nonzero(mask_filled)
+    if len(xs) == 0:
+        return None
+    pts = np.stack([xs, ys], 1).astype(np.float32)
+    frac = (pts @ axis - lo) / (hi - lo + 1e-6)
+    if not low_is_distal:
+        frac = 1.0 - frac
+    return ys, xs, pts, frac
+
+
+def detect_improper_roll(img, mask_filled, mask_raw, bg_color,
+                         img_plain=None, material=None):
+    """The cuff is rolled or bunched rather than lying flat."""
+    contours, _ = cv2.findContours(mask_filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return []
+    cnt = max(contours, key=cv2.contourArea)
+    axis, perp, lo, hi = _basic_rectangle_axis(cnt)
+    axis_len = hi - lo
+    if axis_len < 40:
+        return []
+    low_is_distal = _fingers_at_low_end(mask_filled, axis, perp, lo, hi, img=img)
+    got = _axis_fraction(mask_filled, axis, perp, lo, hi, low_is_distal)
+    if got is None:
+        return []
+    ys, xs, pts, frac = got
+
+    cuff_lo, cuff_hi = ROLL_CUFF_BAND
+    palm_lo, palm_hi = ROLL_PALM_BAND
+    in_cuff = (frac > cuff_lo) & (frac < cuff_hi)
+    in_palm = (frac > palm_lo) & (frac < palm_hi)
+    if in_cuff.sum() < ROLL_MIN_BAND_PX or in_palm.sum() < ROLL_MIN_BAND_PX:
+        return []
+
+    # --- signature 1: the cuff has stopped being darker than the palm ---
+    lightness = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)[:, :, 0].astype(np.float32)
+    inner = cv2.erode(mask_filled, np.ones((7, 7), np.uint8)) > 0
+    cuff_mask = np.zeros(mask_filled.shape, bool)
+    cuff_mask[ys[in_cuff], xs[in_cuff]] = True
+    palm_mask = np.zeros(mask_filled.shape, bool)
+    palm_mask[ys[in_palm], xs[in_palm]] = True
+    cuff_mask &= inner
+    palm_mask &= inner
+    if not cuff_mask.any() or not palm_mask.any():
+        return []
+    darkness = float(np.median(lightness[palm_mask]) - np.median(lightness[cuff_mask]))
+
+    # --- signature 2: the terminal edge is tilted off perpendicular ---
+    edge_sel = frac > ROLL_EDGE_BAND
+    edge_angle = 0.0
+    if edge_sel.sum() >= ROLL_MIN_BAND_PX:
+        edge_pts = pts[edge_sel]
+        centred = edge_pts - edge_pts.mean(axis=0)
+        _, _, vt = np.linalg.svd(centred, full_matrices=False)
+        edge_angle = np.degrees(np.arccos(min(abs(float(vt[0] @ perp)), 1.0)))
+
+    if darkness >= ROLL_DARK_MAX and edge_angle <= ROLL_EDGE_ANGLE_MIN:
+        return []
+
+    box = cv2.boundingRect(np.stack([xs[in_cuff], ys[in_cuff]], 1).astype(np.int32))
+    return [("Improper Roll", tuple(int(v) for v in box))]
+
+
 # ============================================================
 # Defect 3: finger not enough
 # ============================================================
@@ -2882,6 +2980,7 @@ DETECTORS = [
     # detectors win de-duplication in the regions they claim.
     detect_tearing,
     detect_incomplete_beading,
+    detect_improper_roll,
     detect_damage_by_fold,
     detect_open_tears,
     # detect_side_tear sits AFTER detect_open_tears on merge. It was written

@@ -1,24 +1,21 @@
 # Ti Shen — defect detectors & segmentation
 
-My part of the group assignment. The scope changed partway through: the original three
-were crumpled / side tear / improper roll, and we settled instead on **incomplete
-beading**, **damage by fold**, and a third still to be chosen.
+My three defects, all implemented and merged into the team's system:
 
-| detector | defect | state |
+| detector | defect | recall on its own images |
 |---|---|---|
-| `detect_incomplete_beading` | a stretch of the cuff hem is missing | done |
-| `detect_damage_by_fold` | a crease left where the glove was folded | done |
-| `detect_side_tear` | a cut breaching the lateral edge | done, now out of scope |
-| -- | third defect | not started |
+| `detect_incomplete_beading` | a stretch of the cuff hem is missing | 11/11 |
+| `detect_damage_by_fold` | a crease left where the glove was folded | 7/7 |
+| `detect_improper_roll` | the cuff is rolled or bunched, not lying flat | 8/8 |
 
-`detect_side_tear` is kept because it works and cost real effort, but it is no longer
-one of my three. All of them rest on the **segmentation / background removal** work
-below.
+Plus `detect_side_tear`, written when tearing was still mine and kept because it works,
+though it is no longer one of my three. All of them rest on the **segmentation /
+background removal** work below.
 
-> Note for the team: my three defects do not match `DEFECT_ASSIGNMENT_PLAN.md`.
-> That plan gives tears to Member A and puts improper roll on its *excluded* list.
-> The code here is scoped so nothing collides (see **Scope split** below), but the
-> plan document still needs updating to match reality.
+> Note for the team: `DEFECT_ASSIGNMENT_PLAN.md` still puts improper roll on its
+> *excluded* list ("needs fine-grained edge geometry modelling, false-positive rate
+> hard to control"). It is implemented and works -- 8/8 with one false positive on a
+> 7-image control -- so that plan entry is out of date and should be corrected.
 
 ---
 
@@ -360,7 +357,47 @@ than a distinct fold, and that ambiguity was pulling the scoring toward the wron
 
 ---
 
-## 9. Cross-talk between detectors
+## 9. Improper roll
+
+The cuff is rolled or twisted into a thick uneven band at the wrist instead of lying
+flat. Exactly the opposite of incomplete beading: beading is a GAP in the hem, improper
+roll is EXCESS material bunched up.
+
+Two independent signatures, both physical rather than curve-fitted:
+
+**The cuff stops being darker than the palm.** A flat cuff sits in the shadow of the
+wrist. A rolled one bulges towards the camera and catches the light along its ridge.
+Measured as palm lightness minus cuff lightness:
+
+| | palm L − cuff L |
+|---|---|
+| improper roll | −27 .. 11 |
+| normal cuff | 10 .. 34 |
+
+**The terminal edge is tilted.** A properly worn cuff ends roughly PERPENDICULAR to the
+glove's major axis; a rolled one sits at an angle:
+
+| | degrees off perpendicular |
+|---|---|
+| improper roll | 0.4 .. 86.2 |
+| normal cuff | 0.3 .. 4.5 |
+
+The two are OR'd, because either alone is sufficient: a roll that happens to sit square
+to the axis is still caught by its brightness, and a roll on a glove whose cuff is
+naturally pale is still caught by its angle.
+
+The control set is the damage-by-fold images, which have undamaged cuffs.
+
+**Result:** 8/8 on the roll images, 1 false positive across the 7 controls.
+
+**Caveat worth stating in the report:** both thresholds were fitted on 15 images
+(8 defective, 7 control) from a small number of physical gloves. The separation is
+clean on that data, but it is a small sample and the numbers should be re-checked
+against a wider set before they are quoted as general.
+
+---
+
+## 10. Cross-talk between detectors
 
 Running everything over the whole dataset:
 
@@ -385,19 +422,18 @@ detector firing on cotton knit texture, and **Tear / Hole (5)** is Member A.
 
 ---
 
-## 10. Next steps
+## 11. Next steps
 
-1. **Third defect** -- still to be chosen and built.
-2. **Ground truth for beading and fold.** Neither has been scored for LOCALISATION --
+1. **Ground truth for all three detectors.** None has been scored for LOCALISATION --
    "100% recall" here means the right label on the right image, not that the box sits on
    the defect. The side tear work showed how misleading that can be: image-level scoring
    read 100%/100% while box-level was 22%/33%. The process that worked was: I mark the
    expected results, the team verifies them, then we measure.
-3. **Clean gloves.** There are still none in the dataset, so the false-positive rate the
+2. **Clean gloves.** There are still none in the dataset, so the false-positive rate the
    assignment asks for cannot be measured at all. 4-5 undamaged gloves per material.
-4. **Cross-talk arbitration** -- see section 9. Needed for the bonus marks, and it is a
+3. **Cross-talk arbitration** -- see section 10. Needed for the bonus marks, and it is a
    group-level design decision rather than something any one detector can fix.
-5. **Reshoot** if time allows: glove off the hand, tears nudged open, plain saturated
+4. **Reshoot** if time allows: glove off the hand, tears nudged open, plain saturated
    backdrop in a contrasting hue, nothing white or grey in frame, even light, ~10%
    margin, check focus. Most of the segmentation complexity above exists purely to
    survive conditions a clean shot removes.

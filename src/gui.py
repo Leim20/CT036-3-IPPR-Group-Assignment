@@ -87,6 +87,7 @@ DETECTOR_LABELS = {
     "detect_side_tear": "Side Tear",
     "detect_incomplete_beading": "Incomplete Beading",
     "detect_damage_by_fold": "Damage By Fold",
+    "detect_improper_roll": "Improper Roll",
     "detect_stains": "Stain",
     "detect_finger_not_enough": "Finger Not Enough",
     "detect_missing_finger": "Finger Not Enough",  # legacy function-name alias
