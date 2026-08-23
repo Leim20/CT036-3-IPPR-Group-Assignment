@@ -440,6 +440,10 @@ DEFECT_COLORS = {
     "Thin / Overstretched": (255, 0, 255),
     "Spotting": (40, 200, 255),
     "Plastic Contamination": (210, 180, 40),  # cyan-blue
+    "Incomplete Beading": (255, 90, 60),      # blue
+    "Damage By Fold": (60, 200, 60),          # green
+    "Improper Roll": (255, 255, 0),           # cyan
+    "Side Tear": (60, 110, 240),              # orange-red, a shade off Tearing
 }
 DEFAULT_DEFECT_COLOR = (35, 160, 70)  # any detector added later: green
 
@@ -1177,7 +1181,13 @@ def detect_side_tear(img, mask_filled, mask_raw, bg_color,
                      and seen_dist >= SIDE_TEAR_CUFF_MIN_COLOR)
         if not (big_enough or cuff_case):
             continue
-        results.append(("Side Tear", (x, y, cw, ch)))
+        # Evidence: how far past the depth floor the notch reaches. At the
+        # floor it is 50, at twice the floor it saturates at 100.
+        evidence = 50.0 + 50.0 * float(np.clip(
+            depth_ratio / SIDE_TEAR_MIN_DEPTH_RATIO - 1.0, 0.0, 1.0))
+        results.append(Detection("Side Tear", (x, y, cw, ch),
+                                 component.astype(np.uint8) * 255,
+                                 round(evidence, 1)))
 
     # ---- second branch: skin showing THROUGH the glove ----------------
     # These gloves are worn, so a breach in the material exposes the hand.
@@ -1205,7 +1215,11 @@ def detect_side_tear(img, mask_filled, mask_raw, bg_color,
         side = cv2.minAreaRect(pts)[1]
         if max(side) / (min(side) + 1e-6) > SIDE_TEAR_SKIN_MAX_ELONG:
             continue                       # long thin strip: the cuff/arm junction
-        results.append(("Side Tear", (x, y, cw, ch)))
+        evidence = 50.0 + 50.0 * float(np.clip(
+            area / (2.0 * SIDE_TEAR_SKIN_MIN_AREA) - 0.5, 0.0, 1.0))
+        results.append(Detection("Side Tear", (x, y, cw, ch),
+                                 (slabels == i).astype(np.uint8) * 255,
+                                 round(evidence, 1)))
 
     return results
 
@@ -1241,6 +1255,12 @@ BEAD_MIN_EDGE_PTS = 30      # too short a cuff edge to judge
 BEAD_RUN_MIN_FRAC = 0.08    # a defect must span at least this share of the cuff edge
 BEAD_K_SIGMA = 0.8          # how far above the cuff's own median counts as "bead missing"
 BEAD_BOX_PAD = 8
+# Width of the shaded region. The defect is the missing hem, which occupies
+# the strip from the boundary inwards -- exactly the strip the colour is
+# sampled from -- so the band is drawn to that same depth either side of
+# the traced edge rather than filling the whole bounding box.
+BEAD_MASK_WIDTH = 2 * BEAD_SAMPLE_DEPTH + 1
+BEAD_MASK_HALO = 5      # how far outside the glove the band may still show
 
 def _cuff_edge(mask_filled, skin, axis, lo, hi, low_is_distal):
     """The stretch of glove boundary that forms the cuff opening."""
@@ -1364,10 +1384,33 @@ def detect_incomplete_beading(img, mask_filled, mask_raw, bg_color,
     for a, b in merged:
         if b - a < min_run:
             continue
-        x, y, bw, bh = cv2.boundingRect(edge[a:b].astype(np.int32))
-        results.append(("Incomplete Beading",
-                        (max(x - BEAD_BOX_PAD, 0), max(y - BEAD_BOX_PAD, 0),
-                         bw + 2 * BEAD_BOX_PAD, bh + 2 * BEAD_BOX_PAD)))
+        run = edge[a:b].astype(np.int32)
+        # The region is the traced run itself, stroked to the depth the bead
+        # occupies -- a curved band following the cuff, not a rectangle. The
+        # run lies ON the boundary, so half the stroke would fall outside the
+        # glove; it is clipped back to the mask (with a small halo, so the
+        # band stays visible against the background) to keep the shaded area
+        # an honest measure of affected material.
+        region = np.zeros(mask_filled.shape, np.uint8)
+        cv2.polylines(region, [run.reshape(-1, 1, 2)], False, 255,
+                      BEAD_MASK_WIDTH)
+        region = cv2.bitwise_and(region, cv2.dilate(
+            mask_filled, np.ones((BEAD_MASK_HALO,) * 2, np.uint8)))
+        if not region.any():
+            continue
+        # Box from the region, so the shading never overflows its own outline.
+        x, y, bw, bh = cv2.boundingRect(region)
+        # Evidence: how far the run's mean departure sits past the threshold
+        # measured on this glove's own cuff.
+        strength = float(np.mean(score[a:b]))
+        evidence = 50.0 + 50.0 * float(np.clip(
+            strength / BEAD_K_SIGMA - 1.0, 0.0, 1.0))
+        results.append(Detection(
+            "Incomplete Beading",
+            (max(x - BEAD_BOX_PAD, 0), max(y - BEAD_BOX_PAD, 0),
+             bw + 2 * BEAD_BOX_PAD, bh + 2 * BEAD_BOX_PAD),
+            region,
+            round(evidence, 1)))
     return results
 
 
@@ -1492,26 +1535,43 @@ def detect_damage_by_fold(img, mask_filled, mask_raw, bg_color,
             continue
         candidates.append((length * elongation,
                            [int(stats[i, cv2.CC_STAT_LEFT]), int(stats[i, cv2.CC_STAT_TOP]),
-                            int(stats[i, cv2.CC_STAT_WIDTH]), int(stats[i, cv2.CC_STAT_HEIGHT])]))
+                            int(stats[i, cv2.CC_STAT_WIDTH]), int(stats[i, cv2.CC_STAT_HEIGHT])],
+                           i))
     candidates.sort(reverse=True, key=lambda c: c[0])
 
     # one crease often survives as several components, so nearby boxes are
     # merged before the top-N cut -- otherwise the budget is spent on
     # fragments of a single fold rather than on separate defects
     gap = FOLD_MERGE_GAP_FRAC * axis_len
+    # Each entry carries the component labels that went into it, so the
+    # shaded region can be the crease pixels themselves rather than the box
+    # that bounds them -- a fold is a thin diagonal line, and its box is
+    # mostly undamaged glove.
     merged = []
-    for _, (x, y, bw, bh) in candidates:
-        for m in merged:
+    for strength, (x, y, bw, bh), label in candidates:
+        for m, labels_in, best in merged:
             if (x < m[0] + m[2] + gap and m[0] < x + bw + gap and
                     y < m[1] + m[3] + gap and m[1] < y + bh + gap):
                 nx, ny = min(m[0], x), min(m[1], y)
                 m[2] = max(m[0] + m[2], x + bw) - nx
                 m[3] = max(m[1] + m[3], y + bh) - ny
                 m[0], m[1] = nx, ny
+                labels_in.append(label)
                 break
         else:
-            merged.append([x, y, bw, bh])
-    return [("Damage By Fold", tuple(m)) for m in merged[:FOLD_MAX_BOXES]]
+            merged.append(([x, y, bw, bh], [label], strength))
+
+    floor = max(FOLD_MIN_LEN_FRAC * axis_len, 1.0) * FOLD_MIN_ELONG
+    results = []
+    for box, labels_in, strength in merged[:FOLD_MAX_BOXES]:
+        region = np.isin(labels, labels_in).astype(np.uint8) * 255
+        # A crease thresholds to a line a few pixels wide; widen it slightly
+        # so the shading is visible without swallowing the surrounding glove.
+        region = cv2.dilate(region, np.ones((5, 5), np.uint8))
+        evidence = 50.0 + 50.0 * float(np.clip(strength / floor - 1.0, 0.0, 1.0))
+        results.append(Detection("Damage By Fold", tuple(box), region,
+                                 round(evidence, 1)))
+    return results
 
 
 
@@ -1609,7 +1669,20 @@ def detect_improper_roll(img, mask_filled, mask_raw, bg_color,
         return []
 
     box = cv2.boundingRect(np.stack([xs[in_cuff], ys[in_cuff]], 1).astype(np.int32))
-    return [("Improper Roll", tuple(int(v) for v in box))]
+    # The rolled material is the cuff band itself, which follows the glove's
+    # outline. Its bounding box also covers the background on either side of
+    # the wrist, so the band is shaded directly instead.
+    region = np.zeros(mask_filled.shape, np.uint8)
+    region[ys[in_cuff], xs[in_cuff]] = 255
+
+    # Evidence: how far past whichever signature fired. Either alone is
+    # sufficient, so the stronger one is taken.
+    dark_margin = (ROLL_DARK_MAX - darkness) / max(ROLL_DARK_MAX, 1e-6)
+    angle_margin = ((edge_angle - ROLL_EDGE_ANGLE_MIN)
+                    / max(3.0 * ROLL_EDGE_ANGLE_MIN, 1e-6))
+    evidence = 50.0 + 50.0 * float(np.clip(max(dark_margin, angle_margin), 0.0, 1.0))
+    return [Detection("Improper Roll", tuple(int(v) for v in box), region,
+                      round(evidence, 1))]
 
 
 # ============================================================

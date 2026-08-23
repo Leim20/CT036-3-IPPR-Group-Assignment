@@ -422,40 +422,81 @@ detector firing on cotton knit texture, and **Tear / Hole (5)** is Member A.
 
 ---
 
-## 11. Next steps
+## 11. Region highlighting
 
-### Highlight the defect REGION, not just a bounding box  <-- agreed next task
+Every one of my detectors used to report only a rectangle, and a rectangle is a poor
+description of these defects: a fold is a long thin diagonal crease, a beading gap
+follows the curve of the cuff, and an improper roll wraps around the wrist. The box
+covers a lot of glove that is not damaged, which overstates the affected area and
+makes the annotated figures harder to read.
 
-Every detector currently reports a rectangle. A rectangle is a poor description of
-most of these defects: a fold is a long thin diagonal crease, a beading gap follows
-the curve of the cuff, and an improper roll wraps around the wrist. In each case the
-box covers a great deal of glove that is not the defect, which overstates the affected
-area and makes the annotated pictures harder to read in the report.
+The team's shared code already solved the rendering half of this. `Detection` carries
+a `mask` field -- "a uint8 binary image the same size as the preprocessed picture,
+used for pixel-level shading and for affected-area" -- and `draw_results` already
+tints those pixels, outlines them, and falls back to filling the box only when a
+detector supplies no mask. So my detectors were the ones filling whole rectangles
+with colour, because `detection_mask()` had nothing better to fall back on.
 
-The plan is to shade the actual defect pixels instead.
+Each of mine already computed the right pixels internally; they were simply being
+thrown away at the return statement.
 
-**The groundwork already exists.** The team's `Detection` dataclass carries a `mask`
-field precisely for this -- "a uint8 binary image the same size as the preprocessed
-picture, used for pixel-level shading and for affected-area". Several of their
-detectors already populate it. What is missing is that mine do not, and `draw_results`
-still draws rectangles only.
-
-What each of my three would supply as its mask:
-
-| detector | mask it already computes internally |
+| detector | region now shaded |
 |---|---|
-| `detect_damage_by_fold` | the thresholded crease response (`binary`) -- already exactly the fold pixels |
-| `detect_incomplete_beading` | the cuff-edge stations flagged bad, dilated into a band along the edge |
-| `detect_improper_roll` | the cuff band pixels (`in_cuff`), which is the rolled region |
+| `detect_damage_by_fold` | the connected components of the thresholded crease response that survived the length/elongation test, carried through the box-merge so a crease made of several fragments shades as one region |
+| `detect_incomplete_beading` | the traced cuff run, stroked to `BEAD_MASK_WIDTH` (the depth the bead occupies) and clipped back to the glove mask |
+| `detect_improper_roll` | the cuff-band pixels themselves, which follow the glove outline |
+| `detect_side_tear` | the notch / show-through component, which was already a labelled region |
 
-So this is mostly plumbing rather than new image processing: return `Detection(name,
-box, mask=...)` instead of a bare `(name, box)` tuple, and extend `draw_results` to
-tint those pixels rather than -- or as well as -- stroking the rectangle. Keeping the
-box as a thin outline plus a translucent fill is probably the most readable, and it
-keeps every existing consumer that only looks at `box` working unchanged.
+**How much the box was overstating things.** Shaded area as a fraction of the box it
+replaced, measured over the 26 images of my three sets:
 
-Worth doing before the report screenshots are taken, since it directly improves the
-figures in the experimental-results section.
+| detector | mask / box area |
+|---|---|
+| damage by fold | 0.09 -- 0.82 (typically ~0.2) |
+| incomplete beading | 0.15 -- 0.35 |
+| improper roll | 0.06 -- 0.94 |
+
+So for a fold the rectangle was claiming roughly five times the damaged area it should
+have. This feeds straight into `affected_area_percentage()`, which is reported per
+image, so the numbers in the results section were inflated before this change and are
+honest after it.
+
+Two details that needed care:
+
+* The beading run lies **on** the boundary, so half the stroked band fell on the
+  background. It is intersected with the glove mask (dilated by a few pixels so the
+  band still reads against the backdrop) -- otherwise the shaded area counted
+  backdrop as damaged glove.
+* The box is now derived from the region rather than from the raw contour run, so the
+  shading can never spill outside its own outline. Before that fix a few beading
+  regions measured 1.04-1.20x their box.
+
+**Evidence scores.** The same return statements had been leaving `evidence` at its
+default of 0.0, so every one of my detections was labelled "... 0" in the annotated
+image and contributed nothing to `overall_evidence_score()`. Each now reports how far
+past its own threshold the measurement sat, on the team's existing 50-100 convention
+(50 = exactly at the threshold, 100 = comfortably past it):
+
+| detector | measured against |
+|---|---|
+| incomplete beading | mean standardised departure over the run, vs `BEAD_K_SIGMA` |
+| damage by fold | length x elongation, vs the product of the two floors |
+| improper roll | whichever of the two signatures fired harder |
+| side tear | notch depth vs the depth floor; area for the show-through branch |
+
+**Colours.** All four were falling through to the default green, so they could not be
+told apart when several fired on one glove. They now have entries in `DEFECT_COLORS`:
+beading blue, fold green, roll cyan, side tear orange-red. Roll was pink at first and
+had to be changed -- against a magenta `Thin / Overstretched` region on the same glove
+the two were indistinguishable.
+
+**Verified unchanged:** selftest 41/41, pytest 36 passed / 9 subtests, and recall on my
+own sets still 11/11 beading, 7/7 fold, 8/8 roll. This changes what is drawn and what
+`affected_area_percentage` measures, not what is detected.
+
+---
+
+## 12. Next steps
 
 1. **Ground truth for all three detectors.** None has been scored for LOCALISATION --
    "100% recall" here means the right label on the right image, not that the box sits on
