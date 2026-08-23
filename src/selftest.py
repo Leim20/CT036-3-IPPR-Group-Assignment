@@ -40,7 +40,8 @@ BG = (60, 60, 200)       # background colour (BGR, red)
 def make_glove_image(stain_color=(100, 60, 20), tearing=True, stain=True,
                      bright=1.0, offset=(0, 0), bg=BG, glove=GLOVE,
                      noise=0, side_light=False,
-                     open_tear=False, fingertip_tear=False, two_tone=False,
+                     open_tear=False, fingertip_tear=False,
+                     background_fingertip_slit=False, two_tone=False,
                      spots=0, spot_color=(40, 220, 240),
                      plastic=False, glove_scale=1.0):
     """Draw a simulated glove image; the arguments simulate different shooting
@@ -82,7 +83,10 @@ def make_glove_image(stain_color=(100, 60, 20), tearing=True, stain=True,
         cv2.fillPoly(img, [np.array([[270 + ox, 330 + oy],
                                      [370 + ox, 315 + oy],
                                      [270 + ox, 355 + oy]])], bg)
-    if fingertip_tear:  # defect 2b: fingertip tear (a narrow slit down the middle finger)
+    if fingertip_tear:  # defect 1b: shallow torn cap exposes skin at the fingertip
+        cv2.ellipse(img, (400 + ox, 137 + oy), (16, 13),
+                    0, 0, 360, (90, 145, 205), -1)
+    if background_fingertip_slit:  # legacy Open Tear limitation
         cv2.fillPoly(img, [np.array([[393 + ox, 126 + oy],
                                      [400 + ox, 215 + oy],
                                      [407 + ox, 126 + oy]])], bg)
@@ -165,8 +169,8 @@ def build_cases():
         # --- open tears: the point is not to report the 4 normal finger gaps ---
         ("open tear in palm side",     make_glove_image(tearing=False, stain=False,
                                                         open_tear=True),            (0, 1, 0, 0, 0)),
-        ("fingertip tear",             make_glove_image(tearing=False, stain=False,
-                                                        fingertip_tear=True),       (0, 1, 0, 0, 0)),
+        ("skin-cap fingertip tear",    make_glove_image(tearing=False, stain=False,
+                                                        fingertip_tear=True),       (1, 0, 0, 0, 0)),
         ("open tear + enclosed tearing", make_glove_image(stain=False, open_tear=True),
                                                                                     (1, 1, 0, 0, 0)),
         ("three defects at once",      make_glove_image(open_tear=True),            (1, 1, 1, 0, 0)),
@@ -250,6 +254,13 @@ def build_known_issues():
     honest than a defect the tests simply never cover.
     """
     cases = [
+        # The requested fingertip branch is deliberately skin-based. A narrow
+        # background-only slit has no skin component and remains an Open Tear
+        # shape-detector limitation; keep it visible instead of deleting the
+        # old difficult scenario after redefining the skin-cap test above.
+        ("background-only fingertip slit",
+         make_glove_image(tearing=False, stain=False,
+                          background_fingertip_slit=True), (0, 1, 0, 0, 0)),
         # A small dark stain (~700px). The darkness rule works on "how much
         # darker than the material", but finger edges and crease shadows are
         # just as dark: measured, those false alarms run 660-1449px, which
