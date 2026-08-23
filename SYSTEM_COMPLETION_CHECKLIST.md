@@ -40,7 +40,7 @@ implement every defect pictured, but the assignment explicitly requires at least
 |---|---|---|
 | Preprocessing | `src/preprocessing.py` | Resize to 800 px width and 5x5 median blur |
 | Segmentation | `src/segmentation.py` | Centre-patch HSV reference colour, fixed thresholds, morphology and largest contour |
-| Defect detection | `src/defect_detection.py` | Enclosed hole/tear and colour-based stain detectors |
+| Defect detection | `src/defect_detection.py` | Enclosed-hole and colour-based stain detectors |
 | GUI | `src/gui.py` | Open image, detect, show annotated image and list detections |
 | Smoke test | `src/selftest.py` | One synthetic blue glove with one hole and one stain |
 
@@ -48,14 +48,14 @@ implement every defect pictured, but the assignment explicitly requires at least
 
 Only these two detectors are registered in `DETECTORS`:
 
-1. `Tear / Hole`
+1. `Hole`
 2. `Stain`
 
 `detect_missing_finger` and `detect_wrinkles` are comments/placeholders, not
 implemented features.
 
 Nominal defect coverage is currently 2/12 = 16.7% of the assignment minimum.
-Actual coverage is lower because `Tear / Hole` does not detect an open tear that
+Actual coverage is lower because `Hole` does not detect an open tear that
 reaches the glove boundary.
 
 ## 3. P0 blockers - must be fixed before calling the system complete
@@ -271,10 +271,10 @@ removed after validation. Claude Code should independently recreate the cases.
 | Case | Observed result |
 |---|---|
 | Centred clean glove | Segmentation IoU approximately 0.9977; no defect |
-| Internal circular hole | `Tear / Hole` detected |
+| Internal circular hole | `Hole` detected |
 | Hole plus stain | Both current labels detected |
 | Edge-connected/open tear | Tear missed |
-| Off-centre clean glove | IoU approximately 0.1625; often false `Tear / Hole` |
+| Off-centre clean glove | IoU approximately 0.1625; often false `Hole` |
 | Extreme horizontal offset | IoU approximately 0.0002; no valid failure warning |
 | No glove | Filled mask covers 100% of frame; GUI can report `PASSED` |
 | Light glove/light background | Filled mask covers 100% of frame |
@@ -299,7 +299,7 @@ Run from the project root in PowerShell:
 Expected current self-test output includes both:
 
 ```text
-Tear / Hole
+Hole
 Stain
 ```
 
@@ -353,7 +353,7 @@ For every completed checkbox, require at least one of:
 
 Claude Code should explicitly challenge these claims:
 
-- Whether `Tear / Hole` detects open boundary tears, not only enclosed holes.
+- Whether `Hole` remains separate from open boundary tears.
 - Whether generic `Stain` output can legitimately count as multiple defect types.
 - Whether three materials are actually tested rather than only mentioned in README.
 - Whether environmental robustness is measured rather than inferred from using HSV.

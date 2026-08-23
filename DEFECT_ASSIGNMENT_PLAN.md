@@ -40,12 +40,12 @@ processing and are not recommended:
 
 | Family | Defect (Figure 1 naming) | Core algorithm | Difficulty | Status | Suggested owner |
 |---|---|---|---|---|---|
-| 1. Mask subtraction + background-colour check | Hole / Puncture | `mask_filled - mask_raw`, candidate region's average colour approx equal to the background colour | Easy | Done: `detect_holes` | **Member A** |
+| 1. Mask subtraction + background-colour check | Hole | `mask_filled - mask_raw`, candidate region's average colour approx equal to the background colour | Easy | Done: `detect_holes` | **Member A** |
 | 2. Convexity defects (narrow + sharp) | Tearing / Open Tear | convexity defects, mouth-width/depth ratio < 0.45 and apex angle < 24 deg | Medium | Done: `detect_open_tears` | **Member A** |
 | 2. Convexity defects (narrow + sharp, restricted to the fingertip region) | Tearing (fingertip) | same algorithm + a position test ("the notch apex sits in the glove's top quarter") | Medium | Covered by the regression suite | **Member A** |
 | 3. Convexity-defect counting (peaks) | Finger Not Enough / Missing Finger | count convex-hull peaks (fingertips); report if != 5 | Medium | Not started | **Member B** |
 | 3. Convexity-defect counting (valleys) | Touching / Fused Fingers | the deep notch that should exist between two adjacent fingers is missing or too shallow | Medium | Not started | **Member B** |
-| 4. Lab colour distance (single blob, high intensity) | Stain | a blob that deviates from the glove's main colour and isn't the background colour | Easy | Done: `detect_stains` | **Member B** |
+| 4. Material-adaptive Lab/HSV + shape filtering | Stain | material/background chroma plus density/compactness on light material; dominant hue on coloured material, with local Lab only as fallback | Easy | Done: `detect_stains` | **Member B** |
 | 4. Lab colour distance (large area, low intensity) | Discoloration | same distance formula, but a much larger area threshold and a much smaller colour-distance threshold | Easy | Not started | **Member C** |
 | 4. Lab colour distance (count of small blobs) | Spotting | the criterion is "count of small blobs >= N", not the area of a single blob | Medium | Not started | **Member C** |
 | 5. Contour geometry statistics | Oversize / Shape Abnormality | contour area and aspect ratio compared against the mean +/- n standard deviations from clean samples (`good/`) | Easy | Not started | **Member C** |
@@ -66,6 +66,20 @@ satisfying the assignment's hard requirement.
   dark glove" (reproducible via the "known limitations" list at the
   bottom of `selftest.py`). This is a segmentation-layer problem, not an
   issue with the hole detector itself.
+- **Family 4, Stain result and trade-off**: the detector rebuilds a complete
+  surface from normal light material so large brown marks removed by foreground
+  segmentation can re-enter the search. Candidates must differ in Lab chroma
+  from both material and background and pass density/compactness checks, which
+  suppresses yellow background visible through knit holes, finger gaps and
+  thin edges. Coloured gloves use dominant hue, with local Lab only when the
+  primary rule finds nothing. The tuned set has a **24/24 image-level hit**,
+  **0/2 clean-image false positives**, and **36/36 synthetic regressions**.
+  Image-level hit means at least one stain was found, not pixel-level accuracy;
+  visual overlay review still shows some missed faint/edge marks. These 26 real
+  images were used during tuning, so a separate untouched set is required for
+  final accuracy. Stricter compactness reduces stray labels but can miss white,
+  faint, tiny or edge-adjacent marks. Large gradual shifts belong to the
+  Discoloration detector.
 - **Family 4, Discoloration vs Stain**: do NOT just relabel
   `detect_stains`'s output and return it twice under a different name --
   that only counts as 1 technique, and this is exactly the red line
@@ -83,19 +97,11 @@ satisfying the assignment's hard requirement.
   exist in `dataset/raw/<material>/good/` -- synthetic images can't
   produce trustworthy numbers here.
 
-## An open decision that affects `LABEL_MAP` and dataset folder naming
+## Hole and open-tear naming
 
-`detect_holes` currently outputs the label **`"Tear / Hole"`**, but under
-this assignment plan, `Tearing` and `Hole/Puncture` are already two
-separate defects (`Tearing` is output as `"Open Tear"` by
-`detect_open_tears`).
-
-Recommendation: rename `detect_holes`'s label from `"Tear / Hole"` to
-`"Hole / Puncture"`, to separate it more clearly from `"Open Tear"` and
-match Figure 1's naming. This change would touch
-`src/defect_detection.py`, `src/selftest.py`, `src/evaluate.py`'s
-`LABEL_MAP`, and a few spots in `README.md` -- **left untouched for now;
-confirm with the team and it can be applied everywhere in one pass.**
+`detect_holes` outputs **`"Hole"`**. Tearing is a separate defect and is
+output as `"Open Tear"` by `detect_open_tears`, so the GUI, evaluator and
+dataset labels do not combine the two classes.
 
 ---
 

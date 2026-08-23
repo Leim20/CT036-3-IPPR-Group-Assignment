@@ -1,0 +1,90 @@
+"""Focused regression tests for the explainable tearing detector."""
+from pathlib import Path
+import sys
+import unittest
+
+import cv2
+import numpy as np
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from defect_detection import detect_tearing
+
+
+class TearingDetectorTests(unittest.TestCase):
+    BACKGROUND = (45, 190, 80)   # green BGR
+    GLOVE = (200, 90, 35)        # blue BGR
+    SKIN = (90, 145, 205)        # skin-like BGR
+
+    def make_scene(self, skin_center=None):
+        image = np.full((400, 400, 3), self.BACKGROUND, dtype=np.uint8)
+        mask = np.zeros((400, 400), dtype=np.uint8)
+        cv2.rectangle(mask, (50, 50), (350, 350), 255, cv2.FILLED)
+        image[mask > 0] = self.GLOVE
+        if skin_center is not None:
+            cv2.circle(image, skin_center, 22, self.SKIN, cv2.FILLED)
+        lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB).astype(np.float32)
+        bg_color = lab[0, 0]
+        return image, mask, bg_color
+
+    def test_enclosed_skin_region_is_tearing(self):
+        image, mask, bg_color = self.make_scene((200, 200))
+        result = detect_tearing(
+            image, mask, mask, bg_color, img_plain=image, material="nitrile"
+        )
+        self.assertEqual(1, len(result))
+        self.assertEqual("Tearing", result[0][0])
+
+    def test_clean_glove_has_no_tearing(self):
+        image, mask, bg_color = self.make_scene()
+        result = detect_tearing(
+            image, mask, mask, bg_color, img_plain=image, material="nitrile"
+        )
+        self.assertEqual([], result)
+
+    def test_skin_region_touching_outer_edge_is_not_enclosed_tearing(self):
+        image, mask, bg_color = self.make_scene((52, 200))
+        result = detect_tearing(
+            image, mask, mask, bg_color, img_plain=image, material="nitrile"
+        )
+        self.assertEqual([], result)
+
+    def test_large_deep_low_contrast_cotton_tear_is_retained(self):
+        image = np.full((500, 500, 3), self.BACKGROUND, dtype=np.uint8)
+        mask = np.zeros((500, 500), dtype=np.uint8)
+        cv2.rectangle(mask, (50, 50), (450, 450), 255, cv2.FILLED)
+        image[mask > 0] = (210, 210, 210)
+        # Passes the skin-colour rule but sits below cotton's normal 50-point
+        # local-contrast threshold, matching the large photographed palm tear.
+        cv2.circle(image, (250, 220), 60, (160, 160, 210), cv2.FILLED)
+        bg_color = cv2.cvtColor(
+            image, cv2.COLOR_BGR2LAB
+        ).astype(np.float32)[0, 0]
+
+        result = detect_tearing(
+            image, mask, mask, bg_color, img_plain=image, material="cotton"
+        )
+
+        self.assertEqual(1, len(result))
+        self.assertGreater(cv2.countNonZero(result[0].mask), 10000)
+
+    def test_small_low_contrast_cotton_patch_stays_rejected(self):
+        image = np.full((500, 500, 3), self.BACKGROUND, dtype=np.uint8)
+        mask = np.zeros((500, 500), dtype=np.uint8)
+        cv2.rectangle(mask, (50, 50), (450, 450), 255, cv2.FILLED)
+        image[mask > 0] = (210, 210, 210)
+        cv2.circle(image, (250, 220), 15, (160, 160, 210), cv2.FILLED)
+        bg_color = cv2.cvtColor(
+            image, cv2.COLOR_BGR2LAB
+        ).astype(np.float32)[0, 0]
+
+        result = detect_tearing(
+            image, mask, mask, bg_color, img_plain=image, material="cotton"
+        )
+
+        self.assertEqual([], result)
+
+
+if __name__ == "__main__":
+    unittest.main()

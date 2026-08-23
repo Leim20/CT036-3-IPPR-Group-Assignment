@@ -22,7 +22,7 @@ def resize_image(img, target_width=800):
 
 def denoise(img):
     """Median blur: removes noise but keeps edges sharper than a Gaussian
-    blur would (hole edges need to survive)."""
+    blur would (tearing edges need to survive)."""
     h, w = img.shape[:2]
     ksize = min(5, h, w)
     if ksize % 2 == 0:

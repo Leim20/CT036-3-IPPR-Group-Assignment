@@ -93,6 +93,18 @@ BG_REFINE_MIN_RATIO = 0.03
 BG_REFINE_SEP = 30.0
 BG_REFINE_SAMPLE = 40000   # cap the pixel sample so the mode search stays cheap
 
+# From the team's own segmentation work, kept on merge: when the backdrop has a
+# clear hue of its own, compare CHROMA only and ignore lightness. Shadows on a
+# coloured mat differ strongly in brightness and were being taken for glove,
+# while a real stain sits close to the material in lightness and fell under the
+# threshold. Measured by the team on 4 white-cotton photos, switching to pure
+# chroma raised stain coverage inside the mask from 2-3/4 to 4/4. A grey glove
+# on a grey-white background is near-neutral in chroma on both sides and can
+# only be separated by lightness, so the full Lab distance stays as fallback.
+CHROMA_SEG_MIN_SPREAD = 12.0
+BG_MODE_MIN_CHROMA = 10.0   # a background mode must be this chromatic to take part
+                            # in the chroma-only comparison above
+
 # --- Background hue key -------------------------------------------------
 # Lab distance plus Otsu cannot remove a SHADOWED backdrop: shadow moves
 # lightness a long way, so shadowed backdrop sits far from every sampled
@@ -129,6 +141,10 @@ BG_HUE_KSIZE = 5            # morphology kernel for tidying the key
 # A gate at 10 separates them with a wide margin, and it is what keeps the
 # synthetic regression suite unaffected by this stage.
 BG_HUE_MIN_LSTD = 10.0
+# The key is only kept if the mask it produces retains at least this share of
+# the mask obtained without it. Guards the case where backdrop hue and glove
+# hue coincide and the key deletes the glove instead of the background.
+BG_KEY_MIN_KEEP = 0.55
 
 # --- Texture: measured, and deliberately NOT used ----------------------
 # Texture separates glove from backdrop cleanly on paper -- local standard
@@ -355,19 +371,48 @@ def get_background_colors(img, skin=None):
 
 
 def background_distance(lab, bg_colors):
-    """Distance from every pixel to the NEAREST background colour."""
+    """Distance from every pixel to the NEAREST background colour.
+
+    Uses chroma alone when the backdrop is clearly coloured (see the note on
+    CHROMA_SEG_MIN_SPREAD), and the full Lab distance otherwise.
+    """
     bg_colors = np.atleast_2d(bg_colors)
-    d = np.stack([np.linalg.norm(lab - c, axis=2) for c in bg_colors])
-    return d.min(axis=0)
+
+    # Chroma-only comparison is safe only against modes that are THEMSELVES
+    # chromatic. A near-neutral mode -- a black shadow, a grey tile -- has no
+    # chroma to differ from, so under a chroma-only distance every neutral
+    # pixel matches it, including a white glove. Measured on a white cotton
+    # glove over a coloured mat, letting a near-black mode into the chroma
+    # comparison collapsed the mask from 49.7% of frame to 11.2%.
+    chromatic = [c for c in bg_colors
+                 if np.hypot(c[1] - 128.0, c[2] - 128.0) >= BG_MODE_MIN_CHROMA]
+    if chromatic:
+        chroma = np.stack([np.hypot(lab[:, :, 1] - c[1], lab[:, :, 2] - c[2])
+                           for c in chromatic]).min(axis=0)
+        if float(np.percentile(chroma, 90)) >= CHROMA_SEG_MIN_SPREAD:
+            return chroma
+    return np.stack([np.linalg.norm(lab - c, axis=2) for c in bg_colors]).min(axis=0)
 
 
 def get_background_color(img, skin=None):
-    """The single most common background colour (Lab).
+    """Median colour (Lab) of the four image borders: the background reference.
 
-    Kept as-is so existing detectors and evaluate.py continue to work
-    unchanged; segmentation itself uses the multi-mode version above.
+    Deliberately the plain median, NOT the dominant mode from the multi-mode
+    model above. Detectors that were written against this function compare a
+    candidate region's colour to it directly, and a mode is a different thing:
+    under side lighting the border splits into a dark mode and a bright mode,
+    the dominant one is the dark half, and a tear lit from the bright side then
+    fails the colour match and goes undetected. Segmentation uses the modes;
+    everything downstream keeps the median it was built around.
     """
-    return get_background_colors(img, skin)[0]
+    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB).astype(np.float32)
+    h, w = lab.shape[:2]
+    bh, bw = max(int(h * BORDER_RATIO), 1), max(int(w * BORDER_RATIO), 1)
+    border = np.concatenate([
+        lab[:bh].reshape(-1, 3), lab[-bh:].reshape(-1, 3),
+        lab[:, :bw].reshape(-1, 3), lab[:, -bw:].reshape(-1, 3),
+    ])
+    return np.median(border, axis=0)
 
 
 def _threshold_against(lab, bg_colors, skin, bg_key):
@@ -455,13 +500,20 @@ def segment_glove(img):
 
     mask_filled, mask_raw = _threshold_against(lab, bg_colors, skin, bg_key)
 
-    # Guard: if the backdrop's hue happens to be close to the GLOVE's hue,
-    # the key removes the glove instead of the background and the result
-    # collapses. Detect that by the mask becoming implausibly small, and
-    # fall back to segmenting without the key.
-    if bg_key.any() and mask_filled.mean() / 255 < MIN_AREA_RATIO:
-        bg_key = np.zeros_like(bg_key)
-        mask_filled, mask_raw = _threshold_against(lab, bg_colors, skin, bg_key)
+    # Guard: if the backdrop's hue happens to be close to the GLOVE's hue, the
+    # key removes the glove instead of the background. Comparing against an
+    # absolute floor is not enough -- on a white cotton glove over a coloured
+    # mat the key left 5.3% of the frame, which clears a 5% floor while the
+    # correct mask is 53%. So segment BOTH ways and keep the key only when it
+    # does not collapse the glove relative to not using it at all.
+    if bg_key.any():
+        plain_filled, plain_raw = _threshold_against(lab, bg_colors, skin,
+                                                     np.zeros_like(bg_key))
+        keyed_area = mask_filled.mean() / 255
+        plain_area = plain_filled.mean() / 255
+        if keyed_area < BG_KEY_MIN_KEEP * plain_area or keyed_area < MIN_AREA_RATIO:
+            bg_key = np.zeros_like(bg_key)
+            mask_filled, mask_raw = plain_filled, plain_raw
 
     rng = np.random.default_rng(0)     # fixed seed: segmentation stays reproducible
     for _ in range(max(BG_REFINE_ITERS - 1, 0)):
