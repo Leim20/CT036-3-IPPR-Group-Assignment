@@ -24,9 +24,10 @@ dataset/raw/**
 # This labelled dataset is approved for inclusion in the repository.
 !dataset/raw/tearing/**
 
-# Nye Wei Jun's labelled images from the 2026-08-23 capture session.
-!dataset/raw/cotton/spotting/IMG_20260823_*.jpg
-!dataset/raw/latex/plastic/IMG_20260823_*.jpg
+# Nye Wei Jun's labelled images, organised by defect class.
+!dataset/raw/Stain/IMG_20260818_*.jpg
+!dataset/raw/Spotting/IMG_20260823_*.jpg
+!dataset/raw/Plastic Contamination/IMG_20260823_*.jpg
 
 # Local machine-specific config
 .claude/settings.local.json
