@@ -50,6 +50,20 @@ class TearingDetectorTests(unittest.TestCase):
         lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB).astype(np.float32)
         return image, mask, lab[0, 0]
 
+    def make_narrow_finger_pad_scene(self):
+        image = np.full((600, 500, 3), self.BACKGROUND, dtype=np.uint8)
+        mask = np.zeros((600, 500), dtype=np.uint8)
+        cv2.rectangle(mask, (50, 300), (450, 560), 255, cv2.FILLED)
+        for x1, top in (
+            (90, 145), (160, 110), (230, 90), (300, 110), (370, 145)
+        ):
+            cv2.rectangle(mask, (x1, top), (x1 + 40, 320), 255, cv2.FILLED)
+        image[mask > 0] = self.GLOVE
+        cv2.ellipse(image, (250, 190), (10, 18), 0, 0, 360,
+                    self.SKIN, cv2.FILLED)
+        lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB).astype(np.float32)
+        return image, mask, lab[0, 0]
+
     def test_enclosed_skin_region_is_tearing(self):
         image, mask, bg_color = self.make_scene((200, 200))
         result = detect_tearing(
@@ -82,6 +96,28 @@ class TearingDetectorTests(unittest.TestCase):
         self.assertEqual(1, len(result))
         self.assertEqual("Tearing", result[0].name)
         self.assertLess(result[0].box[3], result[0].box[2])
+        self.assertGreater(cv2.countNonZero(result[0].mask), 400)
+
+    def test_skin_hole_on_narrow_finger_pad_uses_local_depth(self):
+        image, mask, bg_color = self.make_narrow_finger_pad_scene()
+        distance = cv2.distanceTransform(
+            (mask > 0).astype(np.uint8), cv2.DIST_L2, 5
+        )
+        patch = np.zeros_like(mask)
+        cv2.ellipse(patch, (250, 190), (10, 18), 0, 0, 360,
+                    255, cv2.FILLED)
+        global_depth_ratio = (
+            float(distance[patch > 0].max()) / float(distance.max())
+        )
+        self.assertLess(global_depth_ratio, 0.20)
+
+        result = detect_tearing(
+            image, mask, mask, bg_color,
+            img_plain=image, material="latex_foam"
+        )
+
+        self.assertEqual(1, len(result))
+        self.assertEqual("Tearing", result[0].name)
         self.assertGreater(cv2.countNonZero(result[0].mask), 400)
 
     def test_long_exposed_finger_is_not_fingertip_tearing(self):
@@ -122,6 +158,7 @@ class TearingDetectorTests(unittest.TestCase):
         cases = (
             "finger_not_enough/cotton/blue_cotton_051.jpg",
             "finger_not_enough/cotton/white_cotton_050.jpg",
+            "finger_not_enough/latex_foam/latex_foam_038.jpg",
             "good/latex_foam/latex_foam_006.jpg",
         )
         for relative_path in cases:
@@ -131,6 +168,31 @@ class TearingDetectorTests(unittest.TestCase):
                     detectors=[detect_tearing],
                 )
                 self.assertEqual([], result["defects"])
+
+    def test_real_finger_pad_tears_are_recovered(self):
+        cases = {
+            "tearing/latex_foam/latex_foam_029.jpg": {
+                (447, 327, 26, 65),
+            },
+            "tearing/latex_foam/latex_foam_020.jpg": {
+                (406, 292, 19, 28),
+                (545, 438, 24, 93),
+            },
+            "tearing/cotton/white_cotton_040.jpg": {
+                (686, 433, 54, 33),
+            },
+        }
+        for relative_path, expected_boxes in cases.items():
+            with self.subTest(image=relative_path):
+                result = process_image(
+                    str(ROOT / "dataset" / "raw" / relative_path),
+                    detectors=[detect_tearing],
+                )
+                detected_boxes = {
+                    item.box for item in result["defects"]
+                    if item.name == "Tearing"
+                }
+                self.assertTrue(expected_boxes.issubset(detected_boxes))
 
     def test_large_deep_low_contrast_cotton_tear_is_retained(self):
         image = np.full((500, 500, 3), self.BACKGROUND, dtype=np.uint8)

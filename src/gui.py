@@ -71,7 +71,6 @@ QUESTION_PAPER_DEFECTS = (
 ADDITIONAL_GROUP_DEFECTS = (
     "Tearing",
     "Open Tear",
-    "Side Tear",
     "Incomplete Beading",
     "Damage By Fold",
     "Stain",
@@ -84,7 +83,6 @@ DEFECT_OPTIONS = QUESTION_PAPER_DEFECTS + ADDITIONAL_GROUP_DEFECTS
 DETECTOR_LABELS = {
     "detect_tearing": "Tearing",
     "detect_open_tears": "Open Tear",
-    "detect_side_tear": "Side Tear",
     "detect_incomplete_beading": "Incomplete Beading",
     "detect_damage_by_fold": "Damage By Fold",
     "detect_improper_roll": "Improper Roll",

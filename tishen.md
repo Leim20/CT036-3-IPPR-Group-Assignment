@@ -8,8 +8,11 @@ My three defects, all implemented and merged into the team's system:
 | `detect_damage_by_fold` | a crease left where the glove was folded | 7/7 |
 | `detect_improper_roll` | the cuff is rolled or bunched, not lying flat | 8/8 |
 
-Plus `detect_side_tear`, written when tearing was still mine and kept because it works,
-though it is no longer one of my three. All of them rest on the **segmentation /
+`detect_side_tear` -- written when tearing was still mine -- was removed from the
+runtime, GUI and evaluator because it caused too many false positives; lateral tears
+now belong to the existing **Open Tear** class. Sections 2, 4 and 5 keep its method and
+measurements as a record, clearly marked. Its two orientation helpers were kept, because
+all three detectors above depend on them. All three rest on the **segmentation /
 background removal** work below.
 
 > Note for the team: `DEFECT_ASSIGNMENT_PLAN.md` still puts improper roll on its
@@ -37,7 +40,6 @@ photo
   ├─ defect_detection.py ──── detect_holes               (Member A)
   │                           detect_incomplete_beading  ← MINE
   │                           detect_damage_by_fold      ← MINE
-  │                           detect_side_tear           ← MINE (out of scope)
   │                           detect_open_tears          (Member A)
   │                           detect_stains              (Member B)
   │                           deduplicate()        IoU > 0.5, registration order wins
@@ -144,8 +146,16 @@ erodes thin tears away (k=5/7/9 all broke the tear tests and lost defects).
 
 ### `src/defect_detection.py`
 
-**New: `detect_side_tear()`** plus helpers `_basic_rectangle_axis()` and
-`_fingers_at_low_end()`. Two branches, unioned:
+**`detect_side_tear()` -- written, then REMOVED.** It was mine while tearing was
+still my defect. Member A deleted it in `0f60112` because its false-positive rate was
+too high (on one cuff photograph it claimed four separate tears), and lateral tears
+now fall to the existing **Open Tear** class. The write-up below is kept because the
+method and its measurements are worth reporting; the code is no longer in the system.
+
+Its two helpers, `_basic_rectangle_axis()` and `_fingers_at_low_end()`, were kept --
+all three of my current detectors depend on them for glove orientation.
+
+It had two branches, unioned:
 
 * **Branch A — notch.** `close(mask, disc) − mask` isolates concavities narrower than
   the disc. A scale-bounded convex deficiency **D = H − S** (Ch 10/11) without the
@@ -169,13 +179,16 @@ gradient is a continuum, so a hole's lightness can land between two sampled mode
 while its chroma matches one exactly — measured 49.2 in full Lab vs 12.0 in chroma.
 
 ### `src/selftest.py`
-`analyse()` counts Open Tear + Side Tear together so all 35 pre-existing expectations
-stay valid. Added `tear_labels()` and `build_side_tear_cases()` — 10 scope tests that
-assert *which* detector claimed each tear, printed as their own block.
+`analyse()` counted Open Tear + Side Tear together so all 35 pre-existing expectations
+stayed valid, and `tear_labels()` / `build_side_tear_cases()` added 10 scope tests
+asserting *which* detector claimed each tear. All of that was removed with the detector;
+the suite now runs 41/41 without it.
 
 ### `src/gui.py`, `src/evaluate.py`
-Registered "Side Tear" in the dropdown, the label map, and `LABEL_MAP`
-(`side_tear` / `edge_tear`).
+Registered "Incomplete Beading", "Damage By Fold" and "Improper Roll" in the dropdown,
+the detector label map, and `LABEL_MAP`. The "Side Tear" entries were removed with the
+detector; `LABEL_MAP` still accepts the legacy `side_tear` / `edge_tear` folder names
+but now maps them to **Open Tear**, so existing labelled data stays usable.
 
 ### `src/isolate.py` — new
 Background-removal viewer. Writes a 3-panel strip per image: photo | glove isolated |
@@ -191,17 +204,25 @@ Useful for labelling ground truth and as a report figure for the segmentation st
 
 ## 3. Scope split with Member A
 
-`detect_side_tear` is registered **before** `detect_open_tears` so the more specific
-detector wins de-duplication inside its band. The two are disjoint by construction:
+This section used to describe how `detect_side_tear` (mine) and `detect_open_tears`
+(Member A's) were kept disjoint -- lateral tears to one, fingertip tears to the other,
+with mine registered first so it won de-duplication inside its band.
 
-* lateral / cuff tear → **Side Tear** (mine)
-* fingertip tear → **Open Tear** (Member A's)
-
-Verified by the 10 scope tests.
+That split no longer exists: side tear was removed and **all tearing is Member A's**.
+My three detectors claim regions no tearing detector looks at -- the cuff hem
+(beading), the glove surface (fold) and the cuff band (roll) -- so there is no
+registration-order dependency between my work and theirs any more. What overlap
+remains is between my own three, and is measured in section 10.
 
 ---
 
 ## 4. Results
+
+> These are the **side tear** figures. The detector has since been removed (see
+> section 2), so this is a record of method rather than a current result. It is kept
+> because it is the only part of my work scored for LOCALISATION, and because the
+> jump from the image-level numbers to the honest ones is the single most useful
+> lesson in this document.
 
 Scored against 43 hand-labelled defects (37 side tears + 6 holes) across 25
 photographs. A detection counts only if the labelled defect centre falls inside the
@@ -405,7 +426,10 @@ Running everything over the whole dataset:
 |---|---|---|
 | Incomplete Beading | 11/11 = 100% | 47.8% |
 | Damage By Fold | 7/7 = 100% | 30.4% |
-| Side Tear | 6/7 = 85.7% | 28.6% |
+| Improper Roll | 8/8 = 100% | not measured in this run |
+
+(The original run of this table also carried a Side Tear row at 85.7% / 28.6%. That
+precision was the lowest of the four and is part of why the detector was dropped.)
 
 **Recall is perfect; precision is not, and the reason is cross-talk rather than bad
 detection.** The fold detector fires on beading images because a torn cuff also creases
@@ -445,7 +469,6 @@ thrown away at the return statement.
 | `detect_damage_by_fold` | the connected components of the thresholded crease response that survived the length/elongation test, carried through the box-merge so a crease made of several fragments shades as one region |
 | `detect_incomplete_beading` | the traced cuff run, stroked to `BEAD_MASK_WIDTH` (the depth the bead occupies) and clipped back to the glove mask |
 | `detect_improper_roll` | the cuff-band pixels themselves, which follow the glove outline |
-| `detect_side_tear` | the notch / show-through component, which was already a labelled region |
 
 **How much the box was overstating things.** Shaded area as a fraction of the box it
 replaced, measured over the 26 images of my three sets:
@@ -482,15 +505,14 @@ past its own threshold the measurement sat, on the team's existing 50-100 conven
 | incomplete beading | mean standardised departure over the run, vs `BEAD_K_SIGMA` |
 | damage by fold | length x elongation, vs the product of the two floors |
 | improper roll | whichever of the two signatures fired harder |
-| side tear | notch depth vs the depth floor; area for the show-through branch |
 
-**Colours.** All four were falling through to the default green, so they could not be
+**Colours.** All of them were falling through to the default green, so they could not be
 told apart when several fired on one glove. They now have entries in `DEFECT_COLORS`:
-beading blue, fold green, roll cyan, side tear orange-red. Roll was pink at first and
+beading blue, fold green, roll cyan. Roll was pink at first and
 had to be changed -- against a magenta `Thin / Overstretched` region on the same glove
 the two were indistinguishable.
 
-**Verified unchanged:** selftest 41/41, pytest 36 passed / 9 subtests, and recall on my
+**Verified unchanged:** selftest 41/41, pytest 40 passed / 13 subtests, and recall on my
 own sets still 11/11 beading, 7/7 fold, 8/8 roll. This changes what is drawn and what
 `affected_area_percentage` measures, not what is detected.
 
