@@ -300,42 +300,114 @@ the very openings the detector reads.
 
 The bead is the finished hem at the cuff: a maroon knitted band on the cotton gloves, a
 rolled edge on latex and nitrile. The defect is a stretch of that hem missing, leaving a
-ragged opening that looks like a tear at the wrist.
+ragged opening at the wrist through which the hand is visible.
 
-**The idea that made it tractable:** a bead is a CONTINUOUS structure, so the defect is
-a DISCONTINUITY in it, and the rest of the same bead is the reference. Every threshold
-is self-referential (median +/- k*sd along this glove own cuff), so nothing needs
-retuning per material or per lighting.
+This one was built **three times**. The two failures are recorded because how they failed
+is what found the right cue, and because the second one is a good illustration of a
+result that passes every number you are measuring while being completely wrong.
 
-1. Segment; find the major axis; the cuff end is whichever end the skin sits nearer
-2. Extract the **cuff opening edge** -- boundary in the cuff band running alongside skin
-3. Reduce it to a **1-D signature** (Ch 10/11): at each station record the colour just
-   inside the edge (the bead) and the local roughness of the edge
-4. Standardise both against the cuff own median and spread, then sum
-5. Flag contiguous runs above threshold, merge runs that nearly touch, box each
+### Version 1 -- a 1-D signature along the cuff boundary
 
-Colour and roughness fail in different places, which is why both are used. Colour is
-strong on cotton where the maroon band is unmistakable and weak on nitrile where the
-roll is nearly the same blue as the body; roughness ignores colour entirely but needs
-sharp focus.
+A bead is a CONTINUOUS structure, so the defect is a DISCONTINUITY in it, and the rest of
+the same bead is the reference. Walk the cuff outline; at each station record the colour
+just inside it and the local roughness of the edge; standardise both against the cuff's
+own median and spread; flag contiguous runs above threshold. (Ch 10/11 boundary
+signature.)
 
-Three fixes came out of testing:
+It labelled all 11 photographs. But on the clearest image in the set -- a hem torn open
+across a third of the cuff, the hand plainly visible through it -- it marked a 700 px
+sliver at one tip of the gap and missed the rest.
 
-| fix | why |
+> **A hem gap does not change the silhouette.** The glove mask over that photograph is a
+> smooth, solid hand shape with no notch in it, because the material either side of the
+> gap still bounds the outline. A boundary signature has almost nothing to read.
+
+### Version 2 -- thresholding the cuff band against its own median colour
+
+If the defect is inside the region rather than on the outline, threshold the region: take
+the cuff band, compute its median Lab colour, flag pixels further than median + k*MAD
+from it. The numbers looked convincing -- the flagged area separated cleanly from the
+intact-cuff controls (0.00068-0.00497 against 0.00000-0.00050), recall stayed 11/11, and
+false positives on the fold set went from 4/7 to 0/7.
+
+**It was still completely wrong, and zooming in was the only way to see it.** Thresholding
+a band against its median finds whatever colour is in the MINORITY. On the cotton gloves
+that is the maroon bead -- so the detector drew its region neatly around **the part of
+the hem that is still there**, the exact inverse of the defect. On the nitrile ones it
+found the shadow under the cuff, or a crease in the bunched material. It never once found
+the gap.
+
+The lesson is the one this document keeps re-learning: **a metric that separates is not
+the same as a metric that is measuring the right thing.** Every number said version 2 was
+better than version 1. Looking at four images at high magnification said it was worse.
+
+### Version 3 -- find the missing material
+
+A gap is not a colour anomaly, it is an ABSENCE. These gloves are photographed being
+worn, so what shows through the gap is the hand:
+
+1. take the unguarded skin-colour test (`skin_chroma_mask`) -- `skin_mask` keeps only
+   components touching the image border, so that a tan glove is not deleted as an arm,
+   and that guard throws away the patch showing through a breach;
+2. keep skin lying INSIDE the glove's convex hull but OUTSIDE the glove -- skin where
+   material ought to be;
+3. drop any component running off the frame: that is the forearm, which always does,
+   while a breach never does;
+4. keep what is left near the cuff end of the major axis.
+
+**Step 4 is what makes it work.** The skin test also fires on the shadow the glove casts
+on a warm backdrop, and those shadows are LARGER than the real tears, so size alone picks
+the wrong one:
+
+| | axis fraction |
 |---|---|
-| near-skin radius 26 -> 70 px | when the forearm is only partly in frame the skin mask is a thin strip, and a tight radius clipped the cuff edge before it reached the defect |
-| run merging (`BEAD_RUN_MERGE_FRAC`) | a single gap dips back under threshold mid-way, so one defect was reported as 3-4 boxes. Merging took 225539 from 4 boxes to 1 |
-| minimum run 0.05 -> 0.08 | removed a spurious box. Swept: at 0.11 real detections start disappearing, so 0.08 is the edge of the safe range |
+| real breach at the cuff | 0.81 .. 1.00 |
+| backdrop shadow elsewhere | 0.05 .. 0.66 |
 
-The red-backdrop photographs also exposed a real bug: **skin detection returned 0%**, so
-the arm fused into the glove. Skin under a red cast measures chroma 48-49, above the old
+**One shadow survives that**, on the yellow-backdrop nitrile photograph: it sits at 0.81
+and is 5,159 px against the real tear's 41 px. What rejects it is that skin seen through a
+hole is the *same skin under the same light* as the forearm already visible in the frame,
+so its HUE must match -- and hue is what survives shadow, which is the whole basis of the
+background key in `segmentation.py`:
+
+| | hue distance from the forearm |
+|---|---|
+| real breach (all 11) | 0 .. 2 |
+| shadow on the backdrop | 4 |
+
+Two rejected alternatives, both measured: **enclosure** (how much of a component's
+surrounding ring is glove) gave 0.46-0.73 for real breaches against 0.10-0.53 for the
+shadows -- overlapping; **lightness against the forearm** gave -17 for a real breach and
+-9 for the shadow -- inverted.
+
+### Result
+
+| | v1 boundary | v2 band colour | v3 missing material |
+|---|---|---|---|
+| recall, 11 beading images | 11/11 | 11/11 | 11/11 |
+| region on the actual defect | 6 of 11 | **0 of 11** | **11 of 11** |
+| false positives, 7 fold images | 4/7 | 0/7 | 2/7 |
+| false positives, 8 roll images | 8/8 | 5/8 | 5/8 |
+
+### Limitations, both of which belong in the report
+
+* **It only works on a worn glove.** The cue is the hand behind the gap. An empty glove
+  with the same defect would show backdrop through it and would not be found. Every
+  photograph in our set is of a worn glove, so this is invisible in the results above --
+  which is exactly why it has to be written down.
+* **A rolled cuff also exposes skin at the wrist**, which is why 5 of the 8 roll images
+  still fire. This is the section 10 arbitration problem. All three versions confused the
+  two, so it is not a regression, but it is not solved.
+* The hue margin is 2 against 4 and rests on a single counter-example. Re-check it if the
+  detector is ever run on new photographs.
+
+### A segmentation bug found along the way
+
+The red-backdrop photographs exposed a real one: **skin detection returned 0%**, so the
+arm fused into the glove. Skin under a red cast measures chroma 48-49, above the old
 bound of 34, but its hue angle (52-58 deg) is still in range while the red backdrop sits
 at 33 deg. Widening chroma to 55 and tightening the angle bound to 74 fixed it without
 disturbing the yellow-backdrop set or the synthetic suite.
-
-**Result:** fires on all 11 images, 100% recall across cotton, latex and nitrile. Boxes
-land cleanly on 6 of 11, 3 more are close, 2 are weak (one rotated shot, one soft-focus
-with a heavy colour cast).
 
 ---
 
@@ -424,7 +496,7 @@ Running everything over the whole dataset:
 
 | detector | recall on its own defect | precision |
 |---|---|---|
-| Incomplete Beading | 11/11 = 100% | 47.8% |
+| Incomplete Beading | 11/11 = 100% | 47.8% (first version; see section 7) |
 | Damage By Fold | 7/7 = 100% | 30.4% |
 | Improper Roll | 8/8 = 100% | not measured in this run |
 

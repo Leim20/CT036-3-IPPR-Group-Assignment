@@ -3755,3 +3755,59 @@ def draw_results(img, defects, alpha=0.38, defect_masks=None):
             font_scale, text_color, thin, cv2.LINE_AA,
         )
     return out
+
+
+
+# ============================================================
+# Ti Shen's detectors -- registered here, but running on their own segmentation
+# ============================================================
+# Incomplete Beading, Damage By Fold and Improper Roll live in the ``tishen``
+# package. They are appended to DETECTORS so the system keeps ONE GUI and one
+# detector list, but they do not use the shared glove mask: each one
+# re-segments the image with its own segmentation and ignores the mask this
+# pipeline hands it. Nothing above this line is modified, and no teammate
+# detector shares any code with them.
+#
+# They are appended LAST on purpose. deduplicate() keeps whichever detector is
+# registered first when two boxes overlap, so being last means these three can
+# never displace a teammate's detection.
+def _adapt_tishen(detector):
+    """Re-wrap a tishen detection as one of THIS module's Detection objects.
+
+    run_all_detectors() checks ``isinstance(item, Detection)`` before it keeps
+    a pixel mask. The tishen package defines its own Detection class -- it has
+    the same fields, but it is a different class, so that check fails and the
+    mask is dropped. build_defect_masks() then cannot rebuild a region for
+    these defect names and returns an empty one, which leaves draw_results()
+    with nothing to shade: the region highlight disappears and only the thin
+    bounding box is drawn.
+
+    Converting here, at the boundary, fixes that without making the tishen
+    package import anything from this module.
+    """
+    def wrapped(img, mask_filled, mask_raw, bg_color,
+                img_plain=None, material=None):
+        return [
+            Detection(str(found.name), tuple(int(v) for v in found.box),
+                      found.mask, float(found.evidence))
+            for found in detector(img, mask_filled, mask_raw, bg_color,
+                                  img_plain=img_plain, material=material)
+        ]
+
+    wrapped.__name__ = detector.__name__          # the GUI labels by name
+    wrapped.__doc__ = detector.__doc__
+    wrapped.__module__ = detector.__module__
+    return wrapped
+
+
+try:
+    from tishen.detection import DETECTORS as _TISHEN_DETECTORS
+    # An earlier version of these three still sits further up this file, from
+    # before they moved into their own package. Drop those stale entries by
+    # name so the GUI lists each defect exactly once, then append the package
+    # versions at the end.
+    _TISHEN_NAMES = {d.__name__ for d in _TISHEN_DETECTORS}
+    DETECTORS = ([d for d in DETECTORS if d.__name__ not in _TISHEN_NAMES]
+                 + [_adapt_tishen(d) for d in _TISHEN_DETECTORS])
+except ImportError:                      # package absent: team system unaffected
+    pass
