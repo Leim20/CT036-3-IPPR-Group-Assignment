@@ -356,7 +356,13 @@ class GloveDefectApp:
             text="Detection mode",
             style="FieldLabel.TLabel",
         ).pack(anchor="w", pady=(0, 6))
-        detector_values = [ALL_DETECTORS_LABEL, *DEFECT_OPTIONS]
+        detector_values = [
+            ALL_DETECTORS_LABEL,
+            *sorted(
+                (label for label in DEFECT_OPTIONS if label in self.detector_by_label),
+                key=str.casefold,
+            ),
+        ]
         self.detector_combo = ttk.Combobox(
             sidebar,
             textvariable=self.detector_var,
