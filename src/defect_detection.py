@@ -197,6 +197,16 @@ PLASTIC_GROW_CLOSE_KSIZE = 15
 PLASTIC_GROW_MAX_RATIO = 0.25   # if it grows past this it has probably leaked, so
                                 # fall back to the density region rather than force it
 
+# Latex-coated gloves have a strongly textured surface. On the 11 labelled
+# latex photographs, an 85% haze threshold connected the film to ordinary glove
+# texture, while one genuine central film patch occupied 8.39% of the glove and
+# was narrowly rejected by the generic 8% seed-area cap. Keep the decision rule
+# (unsaturated highlight density) unchanged, but use a tighter extent trace and
+# a slightly larger seed cap only when trusted metadata says ``latex``.
+PLASTIC_LATEX_MAX_AREA_RATIO = 0.10
+PLASTIC_LATEX_HAZE_SAT_RATIO = 0.75
+PLASTIC_LATEX_GROW_CLOSE_KSIZE = 11
+
 # --- Hole, finger-not-enough and thin-area parameters. These are retained
 # alongside the newer teammate stain/spot/plastic rules above. ---
 STAIN_COLOR_DIST = 25.0    # stain criterion: pixel's Lab distance from the glove's normal colour must be above this
@@ -2589,6 +2599,18 @@ def detect_plastic_contamination(img, mask_filled, mask_raw, bg_color,
         The area cap rejects those, but an extremely over-exposed photo can still
         fool it -- shooting with diffuse light avoids this completely.
     """
+    material_key = str(material).strip().lower() if material is not None else None
+    is_latex = material_key == "latex"
+    max_area_ratio = (
+        PLASTIC_LATEX_MAX_AREA_RATIO if is_latex else PLASTIC_MAX_AREA_RATIO
+    )
+    haze_sat_ratio = (
+        PLASTIC_LATEX_HAZE_SAT_RATIO if is_latex else PLASTIC_HAZE_SAT_RATIO
+    )
+    grow_close_setting = (
+        PLASTIC_LATEX_GROW_CLOSE_KSIZE if is_latex else PLASTIC_GROW_CLOSE_KSIZE
+    )
+
     h, w = img.shape[:2]
     erode_ksize = _odd_kernel(PLASTIC_MASK_ERODE_KSIZE, h, w)
     density_ksize = _odd_kernel(PLASTIC_DENSITY_KSIZE, h, w)
@@ -2627,15 +2649,15 @@ def detect_plastic_contamination(img, mask_filled, mask_raw, bg_color,
 
     glove_area = float(inside.sum())
     min_area = max(PLASTIC_MIN_AREA, glove_area * PLASTIC_MIN_AREA_RATIO)
-    max_area = glove_area * PLASTIC_MAX_AREA_RATIO
+    max_area = glove_area * max_area_ratio
 
     # Haze region: wherever the film covers, saturation is lower overall, whether
     # or not a crease reflects there. It is used only to trace the film's full
     # extent -- the decision still belongs to the density region above. Haze on
     # its own would take in shadows and dark weave too, so it is only trustworthy
     # with a density seed behind it.
-    grow_close = _odd_kernel(PLASTIC_GROW_CLOSE_KSIZE, h, w)
-    hazed = (inside & (sat <= material_sat * PLASTIC_HAZE_SAT_RATIO)).astype(np.uint8)
+    grow_close = _odd_kernel(grow_close_setting, h, w)
+    hazed = (inside & (sat <= material_sat * haze_sat_ratio)).astype(np.uint8)
     if grow_close >= 3:
         hazed = cv2.morphologyEx(
             hazed, cv2.MORPH_CLOSE, np.ones((grow_close, grow_close), np.uint8))

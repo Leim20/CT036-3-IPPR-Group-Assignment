@@ -41,6 +41,8 @@ def infer_material(image_path=None, material=None):
         normalized = "_".join(part for part in normalized.split("_") if part)
         if "latex_foam" in normalized:
             return "latex_foam"
+        if normalized == "latex":
+            return "latex"
         if "nitrile" in normalized:
             return "nitrile"
         if "cotton" in normalized:

@@ -27,7 +27,7 @@ dataset/raw/**
 # Nye Wei Jun's labelled images, organised by defect class.
 !dataset/raw/Stain/IMG_20260818_*.jpg
 !dataset/raw/Spotting/IMG_20260823_*.jpg
-!dataset/raw/Plastic Contamination/IMG_20260823_*.jpg
+!dataset/raw/Plastic Contamination/latex/IMG_20260823_*.jpg
 
 # Local machine-specific config
 .claude/settings.local.json

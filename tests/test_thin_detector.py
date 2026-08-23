@@ -85,6 +85,15 @@ class ThinDetectorTests(unittest.TestCase):
             infer_material("dataset/raw/thin/nitrile/example.jpg", "nitrile"),
         )
 
+    def test_plain_latex_folder_remains_trusted_metadata(self):
+        self.assertEqual(
+            "latex",
+            infer_material(
+                "dataset/raw/Plastic Contamination/latex/example.jpg",
+                "latex",
+            ),
+        )
+
     def test_auto_mode_detects_pale_nitrile_without_metadata(self):
         image = np.full((420, 520, 3), (116, 81, 81), np.uint8)
         mask = np.zeros(image.shape[:2], np.uint8)
