@@ -21,6 +21,11 @@ import cv2
 import numpy as np
 
 from segmentation import get_glove_color, get_background_colors, skin_mask
+# Our own glove segmentation, kept in its own module so that tuning it for
+# beading, fold and roll cannot move any teammate's result. Only those three
+# detectors use it; every other detector keeps the shared mask.
+from tishen_segmentation import (segment_glove as _tishen_segment_glove,
+                                 skin_chroma_mask)
 
 # --- Tunable parameters (kept here for sensitivity experiments and for
 # citing in the report) ---
@@ -1154,193 +1159,210 @@ def _fingers_at_low_end(mask_filled, axis, perp, lo, hi, stations=60, img=None):
 
 
 # ============================================================
+# Our own segmentation, used instead of the one we are handed
+# ============================================================
+# These three detectors take the team's (img, mask_filled, mask_raw, ...)
+# signature so that they can be registered in the one shared GUI. They do NOT
+# use the masks that signature delivers.
+#
+# The reason is that a detector is only as good as the mask it reasons over,
+# and the shared mask is tuned for the team's structural defects. Beading works
+# on skin visible through the cuff, fold on the glove surface, roll on the cuff
+# band -- all three need the segmentation tuned for them, and tuning the shared
+# one would move every teammate's results. So each detector re-segments the
+# image with OUR segmentation and ignores the mask it was given.
+#
+# There is precedent for this in the team's own pipeline: the Stain and Plastic
+# detectors already fall back to _owned_colour_detector_segmentation() when the
+# shared mask does not suit them.
+#
+# Segmentation is the expensive step and all three detectors want the same
+# result, so it is computed once per image and cached. The key is a cheap
+# digest of a subsampled copy: hashing a full 800x1400 frame on every call
+# would cost more than it saves.
+_MASK_CACHE = {}
+_MASK_CACHE_LIMIT = 8
+
+
+def our_masks(img):
+    """(mask_filled, mask_raw) from OUR segmentation, cached per image."""
+    key = (img.shape, hash(img[::16, ::16].tobytes()))
+    hit = _MASK_CACHE.get(key)
+    if hit is None:
+        hit = _tishen_segment_glove(img)
+        if len(_MASK_CACHE) >= _MASK_CACHE_LIMIT:
+            _MASK_CACHE.pop(next(iter(_MASK_CACHE)))
+        _MASK_CACHE[key] = hit
+    return hit
+
+
+# ============================================================
 # Incomplete beading: the cuff hem is interrupted
 # ============================================================
 # The bead is the finished hem at the cuff -- a maroon knitted band on the
 # cotton gloves, a rolled edge on latex and nitrile. "Incomplete beading"
-# means a stretch of that hem is missing, leaving a ragged opening that
-# looks like a tear at the wrist.
+# means a stretch of that hem is missing, leaving a ragged opening at the
+# wrist through which the hand is visible.
 #
-# The key property is that a bead is a CONTINUOUS structure, so the defect
-# is a DISCONTINUITY in it -- and the rest of the same bead is the
-# reference. That makes every threshold self-referential (median +/- k*sd
-# measured along this glove's own cuff) rather than absolute, so nothing
-# needs retuning per material or per lighting.
+# TWO EARLIER VERSIONS FAILED. Both are worth recording because the way
+# they failed is what pointed at the right cue.
 #
-# Method: reduce the cuff boundary to a 1-D signature (Ch 10/11), walking
-# along it and recording at each station the colour just inside the edge
-# and the local roughness of the edge. On an intact bead both run flat. A
-# contiguous run where they jump is the defect.
-BEAD_CUFF_BAND = 0.72       # cuff = this far along the major axis and beyond
-BEAD_NEAR_SKIN = 70         # cuff opening = boundary within this many px of bare skin.
-                            # Generous on purpose: when the forearm is only partly in
-                            # frame the skin mask is a thin strip, and a tight radius
-                            # clips the cuff edge before it reaches the defect.
-BEAD_RUN_MERGE_FRAC = 0.06  # runs separated by less than this share of the edge are one defect
-BEAD_SAMPLE_DEPTH = 10      # how far inside the edge the bead colour is sampled
-BEAD_SMOOTH_WIN = 21        # window for the smoothed contour the roughness is measured against
-BEAD_MIN_EDGE_PTS = 30      # too short a cuff edge to judge
-BEAD_RUN_MIN_FRAC = 0.08    # a defect must span at least this share of the cuff edge
-BEAD_K_SIGMA = 0.8          # how far above the cuff's own median counts as "bead missing"
+#   1. A 1-D SIGNATURE ALONG THE CUFF BOUNDARY (Ch 10/11): walk the outline
+#      and flag runs where the colour just inside it, or its roughness,
+#      departs from the rest of the same cuff. It labelled all 11
+#      photographs, but on the clearest one -- a hem torn open across a
+#      third of the cuff -- it marked a 700 px sliver at one tip and missed
+#      the rest. A hem gap does not change the silhouette: the material
+#      either side of it still bounds the outline, so a boundary signature
+#      has almost nothing to read.
+#
+#   2. THRESHOLDING THE CUFF BAND AGAINST ITS OWN MEDIAN COLOUR. This was
+#      worse, and in an instructive way: it marks whatever colour is in the
+#      MINORITY inside the band. On the cotton gloves that is the maroon
+#      bead -- so it drew its region neatly around the part of the hem that
+#      is STILL THERE, which is the exact inverse of the defect. On the
+#      nitrile ones it found the shadow under the cuff or a crease in the
+#      bunched material. It never once found the gap, because a gap is not
+#      a colour anomaly; it is an ABSENCE.
+#
+# The defect is missing material. These gloves are photographed being worn,
+# so what shows through the gap is the hand:
+#
+#   1. take the unguarded skin-colour test (`skin_chroma_mask`, see the note
+#      there -- `skin_mask` would discard the patch showing through a breach
+#      because it keeps only components that touch the image border);
+#   2. keep the skin lying INSIDE the glove's convex hull but OUTSIDE the
+#      glove itself. That is skin where material ought to be;
+#   3. drop any component that runs off the frame -- that is the forearm,
+#      which always does, while a breach never does;
+#   4. keep what is left near the cuff end of the major axis.
+#
+# Step 4 is what makes it work. The skin test also fires on the shadow
+# between glove and backdrop on the yellow-backdrop photographs, and those
+# shadows are LARGER than the real tears, so size alone picks the wrong one.
+# Position separates them completely -- measured over the 11 photographs:
+#
+#     real breach at the cuff      axis fraction 0.81 .. 1.00
+#     backdrop shadow elsewhere    axis fraction 0.05 .. 0.66
+#
+# so the cut-off sits between them at 0.75. Enclosure (how much of a
+# component's surrounding ring is glove) was measured as an alternative and
+# rejected: 0.46-0.73 for real breaches against 0.10-0.53 for the shadows,
+# which overlaps.
+#
+# KNOWN LIMITATION, and it needs stating in the report: this detector reads
+# the HAND through the gap, so it only works on a glove being worn. An empty
+# glove with the same defect would show backdrop through the gap instead and
+# would not be found. Every photograph in our set is of a worn glove, so the
+# limitation is invisible in these results -- which is exactly why it has to
+# be written down rather than discovered by whoever tests it next.
+BEAD_CUFF_BAND = 0.75       # breach centroid this far along the major axis
+
+
+BEAD_MIN_AREA_FRAC = 0.0001     # smallest believable breach / axis^2
+
+
+BEAD_OPEN = 5               # drop speckle
+
+
+BEAD_CLOSE = 15             # close the breach into one region
+
+
+BEAD_MAX_REGIONS = 2
+
+
 BEAD_BOX_PAD = 8
-# Width of the shaded region. The defect is the missing hem, which occupies
-# the strip from the boundary inwards -- exactly the strip the colour is
-# sampled from -- so the band is drawn to that same depth either side of
-# the traced edge rather than filling the whole bounding box.
-BEAD_MASK_WIDTH = 2 * BEAD_SAMPLE_DEPTH + 1
-BEAD_MASK_HALO = 5      # how far outside the glove the band may still show
 
-def _cuff_edge(mask_filled, skin, axis, lo, hi, low_is_distal):
-    """The stretch of glove boundary that forms the cuff opening."""
-    contours, _ = cv2.findContours(mask_filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-    if not contours:
-        return None
-    cnt = max(contours, key=cv2.contourArea)
-    pts = cnt.reshape(-1, 2).astype(np.float32)
-    frac = (pts @ axis - lo) / (hi - lo + 1e-6)
-    if not low_is_distal:
-        frac = 1.0 - frac
 
-    # Prefer boundary running alongside bare skin -- that is the opening the
-    # hand comes out of. If no skin was found (a heavy colour cast can
-    # defeat the skin rule) fall back to position along the major axis.
-    use_skin = skin is not None and skin.any()
-    near_skin = (cv2.dilate(skin, np.ones((BEAD_NEAR_SKIN,) * 2, np.uint8)) > 0
-                 if use_skin else None)
-    h, w = mask_filled.shape
-    keep = []
-    for i, (x, y) in enumerate(pts):
-        xi, yi = int(round(x)), int(round(y))
-        if not (0 <= xi < w and 0 <= yi < h):
-            continue
-        if frac[i] < BEAD_CUFF_BAND:
-            continue
-        if use_skin and not near_skin[yi, xi]:
-            continue
-        keep.append(i)
-    if len(keep) < BEAD_MIN_EDGE_PTS:
-        return None
-    keep = np.array(keep)
-    segments = np.split(keep, np.where(np.diff(keep) > 5)[0] + 1)
-    longest = max(segments, key=len)
-    return pts[longest] if len(longest) >= BEAD_MIN_EDGE_PTS else None
+# The skin-colour test also passes the SHADOW the glove casts on a warm
+# backdrop, and on one photograph that shadow is larger than the tear and
+# sits at the cuff end of the axis, so neither size nor position rejects it.
+# What rejects it is that skin seen through a hole is the SAME skin, under
+# the same light, as the forearm already visible in the picture -- so its
+# HUE must match, and hue is what survives shadow (that is the whole basis
+# of the background key in segmentation.py). Measured against the forearm's
+# own median hue:
+#     real breach            0 .. 2
+#     shadow on the backdrop 4
+# The margin is narrow and rests on a single counter-example, so this is a
+# threshold to re-check if the detector is ever run on new photographs.
+BEAD_MAX_HUE_SHIFT = 3.0
 
 
 def detect_incomplete_beading(img, mask_filled, mask_raw, bg_color,
                               img_plain=None, material=None):
     """A stretch of the cuff hem is missing.
 
-    See the note above the BEAD_* constants for the reasoning. In short:
-    walk the cuff boundary, record the colour just inside it and how rough
-    it is, and flag any contiguous run where those depart from the rest of
-    the same cuff.
+    See the note above the BEAD_* constants. In short: find the hand showing
+    through the glove near the cuff -- that is where the hem is not.
     """
+    mask_filled, mask_raw = our_masks(img)      # ignore the mask we were given
     contours, _ = cv2.findContours(mask_filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return []
     cnt = max(contours, key=cv2.contourArea)
     axis, perp, lo, hi = _basic_rectangle_axis(cnt)
-    if hi - lo < 20:
+    axis_len = hi - lo
+    if axis_len < 40:
         return []
     low_is_distal = _fingers_at_low_end(mask_filled, axis, perp, lo, hi, img=img)
-    edge = _cuff_edge(mask_filled, skin_mask(img), axis, lo, hi, low_is_distal)
-    if edge is None:
-        return []
 
-    moments = cv2.moments(cnt)
-    if moments["m00"] == 0:
+    # The forearm is the colour reference: whatever shows through a breach has
+    # to look like it. Without one there is nothing to check against, so the
+    # detector stands down rather than guessing.
+    arm = skin_mask(img) > 0
+    if np.count_nonzero(arm) < 500:
         return []
-    centroid = np.array([moments["m10"] / moments["m00"],
-                         moments["m01"] / moments["m00"]], np.float32)
+    hue = cv2.cvtColor(cv2.medianBlur(img, 5), cv2.COLOR_BGR2HSV)[:, :, 0].astype(np.float32)
+    arm_hue = float(np.median(hue[arm]))
 
-    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB).astype(np.float32)
+    hull = np.zeros(mask_filled.shape, np.uint8)
+    cv2.drawContours(hull, [cv2.convexHull(cnt)], -1, 255, cv2.FILLED)
+
+    # skin inside the glove's outline but where the glove is not
+    breach = cv2.bitwise_and(cv2.bitwise_and(skin_chroma_mask(img), hull),
+                             cv2.bitwise_not(mask_raw))
+    breach = cv2.morphologyEx(breach, cv2.MORPH_OPEN,
+                              np.ones((BEAD_OPEN,) * 2, np.uint8))
+    breach = cv2.morphologyEx(breach, cv2.MORPH_CLOSE,
+                              np.ones((BEAD_CLOSE,) * 2, np.uint8))
+
     h, w = mask_filled.shape
-
-    # roughness: how far the edge strays from a smoothed copy of itself
-    k = np.ones(BEAD_SMOOTH_WIN, np.float32) / BEAD_SMOOTH_WIN
-    smooth_x = np.convolve(edge[:, 0], k, "same")
-    smooth_y = np.convolve(edge[:, 1], k, "same")
-    roughness = np.hypot(edge[:, 0] - smooth_x, edge[:, 1] - smooth_y)
-
-    # colour of the material just inside the edge -- the bead itself
-    colours = []
-    for x, y in edge:
-        inward = centroid - np.array([x, y], np.float32)
-        inward /= (np.linalg.norm(inward) + 1e-6)
-        px, py = np.array([x, y], np.float32) + inward * BEAD_SAMPLE_DEPTH
-        xi = min(max(int(round(px)), 1), w - 2)
-        yi = min(max(int(round(py)), 1), h - 2)
-        colours.append(lab[yi - 1:yi + 2, xi - 1:xi + 2].reshape(-1, 3).mean(axis=0))
-    colours = np.array(colours)
-    colour_dev = np.linalg.norm(colours - np.median(colours, axis=0), axis=1)
-
-    def standardise(v):
-        return (v - np.median(v)) / (np.std(v) + 1e-6)
-
-    score = standardise(colour_dev) + standardise(roughness)
-    flag = score > BEAD_K_SIGMA
-
-    # smooth the flag so one defect reads as one run, not a dotted line
-    win = max(int(len(flag) * 0.02), 3)
-    flag = np.convolve(flag.astype(np.float32), np.ones(win) / win, "same") > 0.5
-
-    # collect the runs, then merge ones that nearly touch: a single gap in
-    # the bead often dips back under threshold briefly in the middle, and
-    # without merging it gets reported as three or four separate defects
-    runs = []
-    i = 0
-    while i < len(flag):
-        if not flag[i]:
-            i += 1
+    n, labels, stats, centroids = cv2.connectedComponentsWithStats(breach, 8)
+    min_area = BEAD_MIN_AREA_FRAC * axis_len * axis_len
+    keep = []
+    for i in range(1, n):
+        x, y = int(stats[i, cv2.CC_STAT_LEFT]), int(stats[i, cv2.CC_STAT_TOP])
+        cw, ch = int(stats[i, cv2.CC_STAT_WIDTH]), int(stats[i, cv2.CC_STAT_HEIGHT])
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if x <= 1 or y <= 1 or x + cw >= w - 1 or y + ch >= h - 1:
+            continue                       # runs off frame: this is the arm
+        if area < min_area:
             continue
-        j = i
-        while j < len(flag) and flag[j]:
-            j += 1
-        runs.append([i, j])
-        i = j
-
-    gap = max(int(BEAD_RUN_MERGE_FRAC * len(flag)), 4)
-    merged = []
-    for run in runs:
-        if merged and run[0] - merged[-1][1] <= gap:
-            merged[-1][1] = run[1]
-        else:
-            merged.append(run)
+        frac = (float(np.asarray(centroids[i]) @ axis) - lo) / (axis_len + 1e-6)
+        if not low_is_distal:
+            frac = 1.0 - frac
+        if frac < BEAD_CUFF_BAND:
+            continue                       # not at the cuff
+        if abs(float(np.median(hue[labels == i])) - arm_hue) > BEAD_MAX_HUE_SHIFT:
+            continue                       # wrong hue for skin: a shadow
+        keep.append((area, i, x, y, cw, ch))
+    keep.sort(reverse=True)
 
     results = []
-    min_run = max(int(BEAD_RUN_MIN_FRAC * len(flag)), 6)
-    for a, b in merged:
-        if b - a < min_run:
-            continue
-        run = edge[a:b].astype(np.int32)
-        # The region is the traced run itself, stroked to the depth the bead
-        # occupies -- a curved band following the cuff, not a rectangle. The
-        # run lies ON the boundary, so half the stroke would fall outside the
-        # glove; it is clipped back to the mask (with a small halo, so the
-        # band stays visible against the background) to keep the shaded area
-        # an honest measure of affected material.
-        region = np.zeros(mask_filled.shape, np.uint8)
-        cv2.polylines(region, [run.reshape(-1, 1, 2)], False, 255,
-                      BEAD_MASK_WIDTH)
-        region = cv2.bitwise_and(region, cv2.dilate(
-            mask_filled, np.ones((BEAD_MASK_HALO,) * 2, np.uint8)))
-        if not region.any():
-            continue
-        # Box from the region, so the shading never overflows its own outline.
-        x, y, bw, bh = cv2.boundingRect(region)
-        # Evidence: how far the run's mean departure sits past the threshold
-        # measured on this glove's own cuff.
-        strength = float(np.mean(score[a:b]))
+    for area, i, x, y, cw, ch in keep[:BEAD_MAX_REGIONS]:
+        region = (labels == i).astype(np.uint8) * 255
+        bx = max(x - BEAD_BOX_PAD, 0)
+        by = max(y - BEAD_BOX_PAD, 0)
+        bw = min(cw + 2 * BEAD_BOX_PAD, w - bx)
+        bh = min(ch + 2 * BEAD_BOX_PAD, h - by)
+        # Evidence: how far past the smallest believable breach this one is.
+        # At the acceptance floor it is 50, at ten times it saturates.
         evidence = 50.0 + 50.0 * float(np.clip(
-            strength / BEAD_K_SIGMA - 1.0, 0.0, 1.0))
-        results.append(Detection(
-            "Incomplete Beading",
-            (max(x - BEAD_BOX_PAD, 0), max(y - BEAD_BOX_PAD, 0),
-             bw + 2 * BEAD_BOX_PAD, bh + 2 * BEAD_BOX_PAD),
-            region,
-            round(evidence, 1)))
+            (area / max(min_area, 1.0) - 1.0) / 9.0, 0.0, 1.0))
+        results.append(Detection("Incomplete Beading", (bx, by, bw, bh),
+                                 region, round(evidence, 1)))
     return results
-
 
 
 # ============================================================
@@ -1409,6 +1431,7 @@ def crease_response(gray, axis_len):
 def detect_damage_by_fold(img, mask_filled, mask_raw, bg_color,
                           img_plain=None, material=None):
     """A crease left across the glove where it was folded."""
+    mask_filled, mask_raw = our_masks(img)      # ignore the mask we were given
     contours, _ = cv2.findContours(mask_filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return []
@@ -1550,6 +1573,7 @@ def _axis_fraction(mask_filled, axis, perp, lo, hi, low_is_distal):
 def detect_improper_roll(img, mask_filled, mask_raw, bg_color,
                          img_plain=None, material=None):
     """The cuff is rolled or bunched rather than lying flat."""
+    mask_filled, mask_raw = our_masks(img)      # ignore the mask we were given
     contours, _ = cv2.findContours(mask_filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return []
@@ -3169,11 +3193,19 @@ DETECTORS = [
     # the more specific detectors sit before the rest, so they win
     # de-duplication in the regions they claim.
     detect_tearing,
-    detect_incomplete_beading,
     detect_improper_roll,
     detect_damage_by_fold,
     detect_open_tears,
     detect_finger_not_enough,
+    # Incomplete beading is registered AFTER finger-not-enough on purpose. Its
+    # region is a patch of bare skin at the cuff, and on a glove with short
+    # fingers the same patch reads as a missing finger: the two boxes measured
+    # (306,314,225,58) and (313,321,234,44) on one photograph, well past the
+    # IoU 0.5 that deduplicate() uses. Registered first, beading won that
+    # region and silently removed a teammate's detection. Registered here it
+    # yields, which is the right way round -- beading firing on a non-beading
+    # glove is a false positive, whereas the finger count is not.
+    detect_incomplete_beading,
     detect_thin_area,
     # Spotting has to come before Stain: both detectors match the same batch of
     # small dots, and deduplicate() keeps whichever is registered first, so this
@@ -3755,59 +3787,3 @@ def draw_results(img, defects, alpha=0.38, defect_masks=None):
             font_scale, text_color, thin, cv2.LINE_AA,
         )
     return out
-
-
-
-# ============================================================
-# Ti Shen's detectors -- registered here, but running on their own segmentation
-# ============================================================
-# Incomplete Beading, Damage By Fold and Improper Roll live in the ``tishen``
-# package. They are appended to DETECTORS so the system keeps ONE GUI and one
-# detector list, but they do not use the shared glove mask: each one
-# re-segments the image with its own segmentation and ignores the mask this
-# pipeline hands it. Nothing above this line is modified, and no teammate
-# detector shares any code with them.
-#
-# They are appended LAST on purpose. deduplicate() keeps whichever detector is
-# registered first when two boxes overlap, so being last means these three can
-# never displace a teammate's detection.
-def _adapt_tishen(detector):
-    """Re-wrap a tishen detection as one of THIS module's Detection objects.
-
-    run_all_detectors() checks ``isinstance(item, Detection)`` before it keeps
-    a pixel mask. The tishen package defines its own Detection class -- it has
-    the same fields, but it is a different class, so that check fails and the
-    mask is dropped. build_defect_masks() then cannot rebuild a region for
-    these defect names and returns an empty one, which leaves draw_results()
-    with nothing to shade: the region highlight disappears and only the thin
-    bounding box is drawn.
-
-    Converting here, at the boundary, fixes that without making the tishen
-    package import anything from this module.
-    """
-    def wrapped(img, mask_filled, mask_raw, bg_color,
-                img_plain=None, material=None):
-        return [
-            Detection(str(found.name), tuple(int(v) for v in found.box),
-                      found.mask, float(found.evidence))
-            for found in detector(img, mask_filled, mask_raw, bg_color,
-                                  img_plain=img_plain, material=material)
-        ]
-
-    wrapped.__name__ = detector.__name__          # the GUI labels by name
-    wrapped.__doc__ = detector.__doc__
-    wrapped.__module__ = detector.__module__
-    return wrapped
-
-
-try:
-    from tishen.detection import DETECTORS as _TISHEN_DETECTORS
-    # An earlier version of these three still sits further up this file, from
-    # before they moved into their own package. Drop those stale entries by
-    # name so the GUI lists each defect exactly once, then append the package
-    # versions at the end.
-    _TISHEN_NAMES = {d.__name__ for d in _TISHEN_DETECTORS}
-    DETECTORS = ([d for d in DETECTORS if d.__name__ not in _TISHEN_NAMES]
-                 + [_adapt_tishen(d) for d in _TISHEN_DETECTORS])
-except ImportError:                      # package absent: team system unaffected
-    pass
