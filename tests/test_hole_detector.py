@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from defect_detection import detect_tearing
+from pipeline import process_image
 
 
 class TearingDetectorTests(unittest.TestCase):
@@ -27,6 +28,27 @@ class TearingDetectorTests(unittest.TestCase):
         lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB).astype(np.float32)
         bg_color = lab[0, 0]
         return image, mask, bg_color
+
+    def make_finger_scene(self, exposed_finger=False):
+        image = np.full((500, 500, 3), self.BACKGROUND, dtype=np.uint8)
+        mask = np.zeros((500, 500), dtype=np.uint8)
+        cv2.rectangle(mask, (70, 250), (430, 460), 255, cv2.FILLED)
+        for x1, top in (
+            (90, 110), (160, 70), (230, 80), (300, 70), (370, 110)
+        ):
+            if exposed_finger and x1 == 230:
+                continue
+            cv2.rectangle(mask, (x1, top), (x1 + 50, 270), 255, cv2.FILLED)
+        image[mask > 0] = self.GLOVE
+        if exposed_finger:
+            # A complete uncovered finger is long and attaches at the palm.
+            cv2.rectangle(image, (235, 70), (275, 255), self.SKIN, cv2.FILLED)
+        else:
+            # A torn glove fingertip exposes only a short skin cap immediately
+            # outside the material silhouette.
+            cv2.rectangle(image, (235, 62), (275, 84), self.SKIN, cv2.FILLED)
+        lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB).astype(np.float32)
+        return image, mask, lab[0, 0]
 
     def test_enclosed_skin_region_is_tearing(self):
         image, mask, bg_color = self.make_scene((200, 200))
@@ -49,6 +71,66 @@ class TearingDetectorTests(unittest.TestCase):
             image, mask, mask, bg_color, img_plain=image, material="nitrile"
         )
         self.assertEqual([], result)
+
+    def test_shallow_skin_cap_at_fingertip_is_tearing(self):
+        image, mask, bg_color = self.make_finger_scene()
+
+        result = detect_tearing(
+            image, mask, mask, bg_color, img_plain=image, material="nitrile"
+        )
+
+        self.assertEqual(1, len(result))
+        self.assertEqual("Tearing", result[0].name)
+        self.assertLess(result[0].box[3], result[0].box[2])
+        self.assertGreater(cv2.countNonZero(result[0].mask), 400)
+
+    def test_long_exposed_finger_is_not_fingertip_tearing(self):
+        image, mask, bg_color = self.make_finger_scene(exposed_finger=True)
+
+        result = detect_tearing(
+            image, mask, mask, bg_color, img_plain=image, material="nitrile"
+        )
+
+        self.assertEqual([], result)
+
+    def test_real_cotton_fingertip_caps_are_recovered(self):
+        for image_name in (
+            "white_cotton_025.jpg",
+            "white_cotton_026.jpg",
+            "white_cotton_027.jpg",
+        ):
+            with self.subTest(image=image_name):
+                result = process_image(
+                    str(
+                        ROOT / "dataset" / "raw" / "tearing" / "cotton"
+                        / image_name
+                    ),
+                    detectors=[detect_tearing],
+                )
+                detections = [
+                    item for item in result["defects"]
+                    if item.name == "Tearing"
+                ]
+                self.assertGreaterEqual(len(detections), 1)
+                self.assertTrue(any(
+                    item.mask is not None
+                    and cv2.countNonZero(item.mask) >= 700
+                    for item in detections
+                ))
+
+    def test_real_long_fingers_and_clean_glove_are_not_new_tears(self):
+        cases = (
+            "finger_not_enough/cotton/blue_cotton_051.jpg",
+            "finger_not_enough/cotton/white_cotton_050.jpg",
+            "good/latex_foam/latex_foam_006.jpg",
+        )
+        for relative_path in cases:
+            with self.subTest(image=relative_path):
+                result = process_image(
+                    str(ROOT / "dataset" / "raw" / relative_path),
+                    detectors=[detect_tearing],
+                )
+                self.assertEqual([], result["defects"])
 
     def test_large_deep_low_contrast_cotton_tear_is_retained(self):
         image = np.full((500, 500, 3), self.BACKGROUND, dtype=np.uint8)

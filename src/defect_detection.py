@@ -237,6 +237,26 @@ TEARING_COTTON_LARGE_MIN_AREA_RATIO = 0.008
 TEARING_COTTON_LARGE_MIN_LOCAL_CONTRAST = 30.0
 TEARING_COTTON_LARGE_MIN_INTERIOR_RATIO = 0.70
 
+# Boundary fingertip tearing is handled by a separate branch so the calibrated
+# enclosed-hole rules above remain unchanged.  A real fingertip tear exposes a
+# short skin cap immediately against the end of a glove finger.  A missing
+# glove finger exposes a long skin component instead.  Measurements are made
+# along the glove's own major axis, rather than image x/y, so rotated inspection
+# photos use the same dimensionless limits.
+TEARING_FINGERTIP_DILATE_RATIO = 0.035
+# The three development fingertip caps lie at 0.088-0.115 of glove length;
+# the nearest compact exposed patch from a Finger Not Enough image lies at
+# 0.271.  A 0.20 cut stays between those measured groups and limits this
+# branch to the actual distal tips rather than the side/base of a finger.
+TEARING_FINGERTIP_MAX_POSITION_RATIO = 0.20
+TEARING_FINGERTIP_MAX_DEPTH_RATIO = 0.12
+TEARING_FINGERTIP_MAX_AXIAL_ASPECT_RATIO = 1.20
+TEARING_FINGERTIP_MAX_AREA_RATIO = 0.020
+TEARING_FINGERTIP_INNER_START_RATIO = 0.60
+TEARING_FINGERTIP_MIN_INNER_CONTACT_RATIO = 0.08
+TEARING_FINGERTIP_MIN_OUTLINE_RATIO = 0.05
+TEARING_FINGERTIP_IMAGE_BORDER_MARGIN = 1
+
 # Broad, lighting-tolerant skin ranges in YCrCb and HSV. Requiring both rules
 # avoids accepting blue glove highlights that happen to satisfy only one space.
 SKIN_Y_MIN = 30
@@ -573,6 +593,170 @@ THIN_SEGMENT_DENSITY_MIN = 2
 # ============================================================
 # Defect 1: enclosed tearing
 # ============================================================
+def _detect_fingertip_tears(source, mask_filled, mask_raw, rule):
+    """Detect shallow skin caps attached to the end of a glove finger.
+
+    Candidate skin is found in a narrow band around the complete glove
+    silhouette, including pixels just outside ``mask_filled``.  The full skin
+    component is then measured so clipping it to that band cannot make a long
+    exposed finger look artificially short.  A candidate must be in the distal
+    finger region, attach to glove material on its palm-facing side, and remain
+    shallow both absolutely and relative to its cross-finger width.
+
+    These conditions deliberately reject the elongated exposed fingers handled
+    by ``detect_finger_not_enough`` while retaining a compact torn fingertip as
+    the user-facing ``Tearing`` class.
+    """
+    contours, _ = cv2.findContours(
+        mask_filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+    if not contours:
+        return []
+    glove_contour = max(contours, key=cv2.contourArea)
+    if cv2.contourArea(glove_contour) <= 0:
+        return []
+
+    axis, perp, lo, hi = _basic_rectangle_axis(glove_contour)
+    axis_length = hi - lo
+    if axis_length < 20:
+        return []
+    low_is_distal = _fingers_at_low_end(
+        mask_filled, axis, perp, lo, hi, img=source
+    )
+
+    radius = max(
+        3, int(round(axis_length * TEARING_FINGERTIP_DILATE_RATIO))
+    )
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1)
+    )
+    dilated_glove = cv2.dilate(mask_filled, kernel)
+    eroded_glove = cv2.erode(mask_filled, kernel)
+    outline_zone = cv2.subtract(dilated_glove, eroded_glove) > 0
+
+    material_mask = mask_raw if cv2.countNonZero(mask_raw) else mask_filled
+    near_material = cv2.dilate(material_mask, kernel) > 0
+
+    skin_candidate = _skin_colour_mask(source)
+    skin_candidate = cv2.morphologyEx(
+        skin_candidate, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)
+    )
+    skin_candidate = cv2.morphologyEx(
+        skin_candidate, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8)
+    )
+    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        (skin_candidate > 0).astype(np.uint8), 8
+    )
+
+    minimum_area = max(
+        int(rule["min_area"]),
+        int(round(0.00015 * axis_length * axis_length)),
+    )
+    maximum_area = TEARING_FINGERTIP_MAX_AREA_RATIO * axis_length * axis_length
+    results = []
+    for label in range(1, component_count):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < minimum_area or area > maximum_area:
+            continue
+
+        x = int(stats[label, cv2.CC_STAT_LEFT])
+        y0 = int(stats[label, cv2.CC_STAT_TOP])
+        width = int(stats[label, cv2.CC_STAT_WIDTH])
+        height = int(stats[label, cv2.CC_STAT_HEIGHT])
+        image_height, image_width = mask_filled.shape[:2]
+        border_margin = TEARING_FINGERTIP_IMAGE_BORDER_MARGIN
+        if (
+            x <= border_margin
+            or y0 <= border_margin
+            or x + width >= image_width - border_margin
+            or y0 + height >= image_height - border_margin
+        ):
+            # A fingertip tear is bounded within the photograph. Components
+            # entering from the frame are the forearm, backdrop, or a partial
+            # hand and must not be painted as glove damage.
+            continue
+
+        component = labels == label
+        outline_pixels = int(np.count_nonzero(component & outline_zone))
+        outline_ratio = float(outline_pixels) / max(area, 1)
+        if outline_ratio < TEARING_FINGERTIP_MIN_OUTLINE_RATIO:
+            continue
+
+        component_y, component_x = np.nonzero(component)
+        points = np.column_stack((component_x, component_y)).astype(np.float32)
+        along = points @ axis
+        across = points @ perp
+        if low_is_distal:
+            distal_fraction = (along - lo) / axis_length
+        else:
+            distal_fraction = (hi - along) / axis_length
+
+        centroid_position = float(distal_fraction.mean())
+        if centroid_position > TEARING_FINGERTIP_MAX_POSITION_RATIO:
+            continue
+
+        axial_span = float(along.max() - along.min() + 1.0)
+        cross_span = float(across.max() - across.min() + 1.0)
+        axial_aspect_ratio = axial_span / max(cross_span, 1.0)
+        depth_ratio = axial_span / axis_length
+        if (
+            axial_aspect_ratio > TEARING_FINGERTIP_MAX_AXIAL_ASPECT_RATIO
+            or depth_ratio > TEARING_FINGERTIP_MAX_DEPTH_RATIO
+        ):
+            # A long exposed component is a missing/short glove finger, not a
+            # shallow tear in the fingertip material.
+            continue
+
+        distal_min = float(distal_fraction.min())
+        distal_max = float(distal_fraction.max())
+        inner_start = distal_min + TEARING_FINGERTIP_INNER_START_RATIO * (
+            distal_max - distal_min
+        )
+        inner_points = distal_fraction >= inner_start
+        if not inner_points.any():
+            continue
+        inner_x = component_x[inner_points]
+        inner_y = component_y[inner_points]
+        inner_contact_ratio = float(
+            np.count_nonzero(near_material[inner_y, inner_x])
+        ) / max(int(np.count_nonzero(inner_points)), 1)
+        if inner_contact_ratio < TEARING_FINGERTIP_MIN_INNER_CONTACT_RATIO:
+            continue
+
+        area_fit = min(1.0, area / max(4.0 * minimum_area, 1.0))
+        contact_fit = min(
+            1.0,
+            inner_contact_ratio
+            / max(2.0 * TEARING_FINGERTIP_MIN_INNER_CONTACT_RATIO, 1e-6),
+        )
+        shape_fit = np.clip(
+            1.0
+            - axial_aspect_ratio
+            / TEARING_FINGERTIP_MAX_AXIAL_ASPECT_RATIO,
+            0.0,
+            1.0,
+        )
+        position_fit = np.clip(
+            1.0
+            - centroid_position / TEARING_FINGERTIP_MAX_POSITION_RATIO,
+            0.0,
+            1.0,
+        )
+        evidence = 50.0 + 50.0 * (
+            0.20 * area_fit
+            + 0.35 * contact_fit
+            + 0.25 * shape_fit
+            + 0.20 * position_fit
+        )
+        results.append(Detection(
+            "Tearing",
+            (x, y0, width, height),
+            component.astype(np.uint8) * 255,
+            round(float(evidence), 1),
+        ))
+    return results
+
+
 def detect_tearing(img, mask_filled, mask_raw, bg_color,
                    img_plain=None, material=None):
     """Detect enclosed punctures that expose the wearer's skin.
@@ -583,7 +767,9 @@ def detect_tearing(img, mask_filled, mask_raw, bg_color,
     classical skin-colour rules, then rejects candidates that touch the glove's
     outside boundary, lack a sharp colour transition, or sit too close to the
     silhouette edge. Those checks prevent exposed fingertips from being
-    labelled as palm tearing.
+    labelled as palm tearing. A separate, additive branch handles a shallow
+    skin cap attached at the glove's fingertip boundary; elongated exposed
+    fingers remain the responsibility of Finger Not Enough.
 
     When no material metadata is supplied (as in the synthetic regression
     tests), a strict background-revealing fallback is also run. Real dataset
@@ -736,6 +922,9 @@ def detect_tearing(img, mask_filled, mask_raw, bg_color,
                     blob,
                     round(float(evidence), 1),
                 ))
+    results.extend(_detect_fingertip_tears(
+        source, mask_filled, mask_raw, rule
+    ))
     return results
 
 
