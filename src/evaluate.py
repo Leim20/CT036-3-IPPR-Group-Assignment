@@ -78,6 +78,12 @@ LABEL_MAP = {
 GOOD_DIR_NAMES = {"good", "ok", "normal", "pass"}   # folder names that mean "clean glove"
 IMG_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
 
+# Different members set up their own slice of the dataset before anyone agreed
+# on one folder order, so both are in use: dataset/raw/<defect>/<material>/ and
+# dataset/raw/<material>/<defect>/. This whitelist is how collect_images tells
+# them apart -- add a name here if you introduce a new material.
+MATERIAL_NAMES = {"cotton", "nitrile", "latex", "latex_foam", "foam", "rubber", "leather"}
+
 
 def parse_expected(folder_name):
     """Folder name -> the set of defect names expected. Empty set for good ones."""
@@ -94,23 +100,66 @@ def parse_expected(folder_name):
     return labels
 
 
+def _images_in(folder):
+    """Image filenames sitting directly in this folder (not recursive)."""
+    return [fn for fn in sorted(os.listdir(folder))
+            if os.path.splitext(fn)[1].lower() in IMG_EXT]
+
+
 def collect_images(root):
-    """Scan dataset/raw and return [(image path, material, expected defects), ...]"""
+    """Scan dataset/raw and return [(image path, material, expected defects), ...]
+
+    Three layouts are all accepted, because all three exist in this dataset:
+
+        dataset/raw/tearing/cotton/*.jpg   <- defect / material
+        dataset/raw/nitrile/plastic/*.jpg  <- material / defect
+        dataset/raw/stain/*.jpg            <- defect only, material unknown
+
+    A folder that holds images directly is a defect folder (material
+    unspecified). A folder that holds only subfolders is two-level; which
+    side is the material is decided from MATERIAL_NAMES above, not assumed
+    to always be in the same order -- guessing wrong here used to make the
+    scan silently find almost nothing, which is worse than crashing because
+    the resulting accuracy table still looked plausible.
+    """
     items = []
     if not os.path.isdir(root):
         return items
-    for defect_dir in sorted(os.listdir(root)):
-        defect_path = os.path.join(root, defect_dir)
-        if not os.path.isdir(defect_path):
+
+    # Loose images directly under the dataset root: no folder to read a
+    # label from, so they can only count towards the false-alarm rate.
+    for fn in _images_in(root):
+        items.append((os.path.join(root, fn), "unspecified", set()))
+
+    for name in sorted(os.listdir(root)):
+        top = os.path.join(root, name)
+        if not os.path.isdir(top):
             continue
-        expected = parse_expected(defect_dir)
-        for material in sorted(os.listdir(defect_path)):
-            material_path = os.path.join(defect_path, material)
-            if not os.path.isdir(material_path):
-                continue
-            for fn in sorted(os.listdir(material_path)):
-                if os.path.splitext(fn)[1].lower() in IMG_EXT:
-                    items.append((os.path.join(material_path, fn), material, expected))
+
+        direct = _images_in(top)
+        if direct:
+            expected = parse_expected(name)
+            for fn in direct:
+                items.append((os.path.join(top, fn), "unspecified", expected))
+            continue
+
+        subnames = [s for s in sorted(os.listdir(top))
+                    if os.path.isdir(os.path.join(top, s))]
+        if not subnames:
+            continue
+
+        if name.lower() in MATERIAL_NAMES:
+            # dataset/raw/<material>/<defect>/*.jpg
+            for sub in subnames:
+                expected = parse_expected(sub)
+                for fn in _images_in(os.path.join(top, sub)):
+                    items.append((os.path.join(top, sub, fn), name, expected))
+        else:
+            # dataset/raw/<defect>/<material>/*.jpg
+            expected = parse_expected(name)
+            for sub in subnames:
+                for fn in _images_in(os.path.join(top, sub)):
+                    items.append((os.path.join(top, sub, fn), sub, expected))
     return items
 
 
