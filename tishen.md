@@ -424,6 +424,39 @@ detector firing on cotton knit texture, and **Tear / Hole (5)** is Member A.
 
 ## 11. Next steps
 
+### Highlight the defect REGION, not just a bounding box  <-- agreed next task
+
+Every detector currently reports a rectangle. A rectangle is a poor description of
+most of these defects: a fold is a long thin diagonal crease, a beading gap follows
+the curve of the cuff, and an improper roll wraps around the wrist. In each case the
+box covers a great deal of glove that is not the defect, which overstates the affected
+area and makes the annotated pictures harder to read in the report.
+
+The plan is to shade the actual defect pixels instead.
+
+**The groundwork already exists.** The team's `Detection` dataclass carries a `mask`
+field precisely for this -- "a uint8 binary image the same size as the preprocessed
+picture, used for pixel-level shading and for affected-area". Several of their
+detectors already populate it. What is missing is that mine do not, and `draw_results`
+still draws rectangles only.
+
+What each of my three would supply as its mask:
+
+| detector | mask it already computes internally |
+|---|---|
+| `detect_damage_by_fold` | the thresholded crease response (`binary`) -- already exactly the fold pixels |
+| `detect_incomplete_beading` | the cuff-edge stations flagged bad, dilated into a band along the edge |
+| `detect_improper_roll` | the cuff band pixels (`in_cuff`), which is the rolled region |
+
+So this is mostly plumbing rather than new image processing: return `Detection(name,
+box, mask=...)` instead of a bare `(name, box)` tuple, and extend `draw_results` to
+tint those pixels rather than -- or as well as -- stroking the rectangle. Keeping the
+box as a thin outline plus a translucent fill is probably the most readable, and it
+keeps every existing consumer that only looks at `box` working unchanged.
+
+Worth doing before the report screenshots are taken, since it directly improves the
+figures in the experimental-results section.
+
 1. **Ground truth for all three detectors.** None has been scored for LOCALISATION --
    "100% recall" here means the right label on the right image, not that the box sits on
    the defect. The side tear work showed how misleading that can be: image-level scoring
