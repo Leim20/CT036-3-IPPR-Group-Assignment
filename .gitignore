@@ -15,19 +15,18 @@ dataset/evaluation_result.csv
 dataset/failures/
 dataset/generated/
 
-# Private assignment photographs. Keep only the empty folder structure in Git;
-# raw images and any other local dataset content must not enter the public repo.
+# The dataset is distributed separately from the source-code repository.
+# Keep only the empty folder structure in Git; raw images and any other local
+# dataset content must not enter the repository.
 dataset/raw/**
 !dataset/raw/**/
 !dataset/raw/**/.gitkeep
 
-# This labelled dataset is approved for inclusion in the repository.
-!dataset/raw/tearing/**
-
-# Nye Wei Jun's labelled images, organised by defect class.
-!dataset/raw/Stain/IMG_20260818_*.jpg
-!dataset/raw/Spotting/IMG_20260823_*.jpg
-!dataset/raw/Plastic Contamination/latex/IMG_20260823_*.jpg
+# Personal report and presentation files are shared separately.
+*.docx
+*.pptx
+*.pptx.inspect.ndjson
+presentation/
 
 # Local machine-specific config
 .claude/settings.local.json

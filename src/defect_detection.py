@@ -277,7 +277,7 @@ TEARING_FINGERTIP_MIN_INNER_CONTACT_RATIO = 0.08
 TEARING_FINGERTIP_MIN_OUTLINE_RATIO = 0.05
 TEARING_FINGERTIP_IMAGE_BORDER_MARGIN = 1
 
-# A hole on the finger pad (指腹) is enclosed, but its distance to the glove
+# A hole on the finger pad is enclosed, but its distance to the glove
 # edge is naturally smaller than a palm hole's because the finger itself is
 # narrow.  The old global depth normalisation missed such regions at 0.138-
 # 0.194 even though they occupy 0.41-0.90 of their local finger half-width.
