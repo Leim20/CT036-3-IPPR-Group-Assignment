@@ -48,8 +48,12 @@ import numpy as np
 #     blue nitrile      28.9   -106.7   <- nowhere near
 # Skin shares an angle with cotton and a chroma band with the backdrop,
 # but nothing shares BOTH, so the two criteria are required together.
-SKIN_CHROMA = (13.0, 34.0)     # magnitude in the a*b* plane: above cotton, below the backdrop
-SKIN_ANGLE = (42.0, 76.0)      # hue angle (degrees) in the a*b* plane: below the backdrop's 79-83
+SKIN_CHROMA = (13.0, 55.0)     # magnitude in the a*b* plane. Upper bound raised from 34:
+                               # under a strong red colour cast skin measures chroma 48-49,
+                               # and the red backdrop is excluded by ANGLE (33 deg) not chroma.
+SKIN_ANGLE = (42.0, 74.0)      # hue angle (deg) in the a*b* plane. Skin measures 52-69,
+                               # yellow backdrop 79-83, red backdrop 33 -- so this bound is
+                               # what keeps both backdrops out now that chroma is permissive.
 SKIN_KSIZE = 7                 # morphology kernel for cleaning the skin mask
 MIN_SKIN_RATIO = 0.02          # ignore a skin mask this small -- probably just noise
 

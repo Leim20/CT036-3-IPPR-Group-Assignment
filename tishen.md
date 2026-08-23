@@ -1,8 +1,19 @@
-# Ti Shen — Side Tear detection & segmentation work
+# Ti Shen — defect detectors & segmentation
 
-My part of the group assignment: **crumpled glove**, **side tear**, **improper roll**.
-This document covers the **side tear** detector and the **segmentation / background
-removal** work it required. Crumpled and improper roll are not started yet.
+My part of the group assignment. The scope changed partway through: the original three
+were crumpled / side tear / improper roll, and we settled instead on **incomplete
+beading**, **damage by fold**, and a third still to be chosen.
+
+| detector | defect | state |
+|---|---|---|
+| `detect_incomplete_beading` | a stretch of the cuff hem is missing | done |
+| `detect_damage_by_fold` | a crease left where the glove was folded | done |
+| `detect_side_tear` | a cut breaching the lateral edge | done, now out of scope |
+| -- | third defect | not started |
+
+`detect_side_tear` is kept because it works and cost real effort, but it is no longer
+one of my three. All of them rest on the **segmentation / background removal** work
+below.
 
 > Note for the team: my three defects do not match `DEFECT_ASSIGNMENT_PLAN.md`.
 > That plan gives tears to Member A and puts improper roll on its *excluded* list.
@@ -26,10 +37,12 @@ photo
   │                           _repair_holes()      fill holes that are really glove
   │                           → mask_filled, mask_raw
   │
-  ├─ defect_detection.py ──── detect_holes         (Member A)
-  │                           detect_side_tear     ← MINE
-  │                           detect_open_tears    (Member A)
-  │                           detect_stains        (Member B)
+  ├─ defect_detection.py ──── detect_holes               (Member A)
+  │                           detect_incomplete_beading  ← MINE
+  │                           detect_damage_by_fold      ← MINE
+  │                           detect_side_tear           ← MINE (out of scope)
+  │                           detect_open_tears          (Member A)
+  │                           detect_stains              (Member B)
   │                           deduplicate()        IoU > 0.5, registration order wins
   │
   └─ gui.py / evaluate.py ─── display and batch scoring
@@ -53,7 +66,8 @@ backdrop with the glove off the hand.
 
 ## 2. What changed in the codebase
 
-Nothing is committed yet. `git status` shows 5 modified files and 2 new ones.
+The side tear and segmentation work is committed as `d5761ea` on branch
+`tishen/side-tear-and-segmentation`; the beading and fold detectors sit on top of it.
 
 ### `src/segmentation.py` — heavily extended
 
@@ -231,6 +245,8 @@ for the report's "rational critical evaluation of candidate techniques".
 | Enclosure ratio for skin patches | 0.49 vs 0.45 — no separation |
 | Relaxing area/depth globally for emphatic colour | F1 0.584 → **0.562** |
 | Larger morphological opening (k=5/7/9) | broke tear tests, lost defects |
+| Enclosure ratio for skin-through patches | 0.49 vs 0.45 -- no separation at all |
+| Directional closing to rejoin a dashed fold ridge | bridged the fragments, but also merged the ridge into neighbouring creases: two images produced one box swallowing most of the glove, two lost detection entirely, and the two it was aimed at still missed |
 
 **The texture rescue is the instructive one.** It produced the cleanest masks of the
 whole exercise — `224955` went from 80.5% to **100%** glove coverage — and **halved**
@@ -262,19 +278,130 @@ the very openings the detector reads.
 
 ---
 
-## 7. Next steps
+## 7. Incomplete beading
 
-1. **Reshoot** — decided. Glove **off the hand**, tears nudged **open**, plain
-   saturated backdrop in a contrasting hue, nothing white or grey in frame, even
-   light, ~10% margin, check focus. Include **4–5 clean gloves per material** for a
-   `good/` folder.
-2. **Redo segmentation first** and confirm it is right before touching the detector.
-   Most of the segmentation complexity above exists to survive conditions the reshoot
-   removes.
-3. **Re-label ground truth** using the same process — it caught real errors twice:
-   I mark expected results → the team verifies → only then measure.
-4. **Then** rebuild the detector, scoring localisation from the first iteration.
-5. Still to start: **crumpled glove** and **improper roll**.
+The bead is the finished hem at the cuff: a maroon knitted band on the cotton gloves, a
+rolled edge on latex and nitrile. The defect is a stretch of that hem missing, leaving a
+ragged opening that looks like a tear at the wrist.
+
+**The idea that made it tractable:** a bead is a CONTINUOUS structure, so the defect is
+a DISCONTINUITY in it, and the rest of the same bead is the reference. Every threshold
+is self-referential (median +/- k*sd along this glove own cuff), so nothing needs
+retuning per material or per lighting.
+
+1. Segment; find the major axis; the cuff end is whichever end the skin sits nearer
+2. Extract the **cuff opening edge** -- boundary in the cuff band running alongside skin
+3. Reduce it to a **1-D signature** (Ch 10/11): at each station record the colour just
+   inside the edge (the bead) and the local roughness of the edge
+4. Standardise both against the cuff own median and spread, then sum
+5. Flag contiguous runs above threshold, merge runs that nearly touch, box each
+
+Colour and roughness fail in different places, which is why both are used. Colour is
+strong on cotton where the maroon band is unmistakable and weak on nitrile where the
+roll is nearly the same blue as the body; roughness ignores colour entirely but needs
+sharp focus.
+
+Three fixes came out of testing:
+
+| fix | why |
+|---|---|
+| near-skin radius 26 -> 70 px | when the forearm is only partly in frame the skin mask is a thin strip, and a tight radius clipped the cuff edge before it reached the defect |
+| run merging (`BEAD_RUN_MERGE_FRAC`) | a single gap dips back under threshold mid-way, so one defect was reported as 3-4 boxes. Merging took 225539 from 4 boxes to 1 |
+| minimum run 0.05 -> 0.08 | removed a spurious box. Swept: at 0.11 real detections start disappearing, so 0.08 is the edge of the safe range |
+
+The red-backdrop photographs also exposed a real bug: **skin detection returned 0%**, so
+the arm fused into the glove. Skin under a red cast measures chroma 48-49, above the old
+bound of 34, but its hue angle (52-58 deg) is still in range while the red backdrop sits
+at 33 deg. Widening chroma to 55 and tightening the angle bound to 74 fixed it without
+disturbing the yellow-backdrop set or the synthetic suite.
+
+**Result:** fires on all 11 images, 100% recall across cotton, latex and nitrile. Boxes
+land cleanly on 6 of 11, 3 more are close, 2 are weak (one rotated shot, one soft-focus
+with a heavy colour cast).
+
+---
+
+## 8. Damage by fold
+
+A fold leaves a long dark crease across the glove SURFACE. Unlike everything else here
+it is not a boundary feature, so none of the contour machinery applies.
+
+**Morphological blackhat with a LINE structuring element** (Ch 8) responds to dark
+structures narrower than the element, so a line about a tenth of the glove length picks
+up a crease while ignoring the woven texture of a fabric glove -- that texture is
+fine-scale in EVERY direction and never fills a long line. Sweeping 12 orientations and
+keeping the maximum makes the response independent of which way the fold runs.
+
+Two regions must be excluded, both found by looking at the response map: the glove
+**boundary** (finger gaps are dark valleys and light up hard) and the **cuff** (knitted
+ribbing is a regular line pattern that swamps a real crease).
+
+Candidates are scored on **length x elongation**: a fold is long and straight, a shadow
+blob is neither, a strip of grip pattern is straight but short.
+
+Two threshold decisions worth recording:
+
+* **Rank threshold, not median + k*sigma.** On a low-contrast crease the sigma of the
+  whole glove buries the defect; two images were missed for exactly that reason even
+  though the response traced their folds perfectly. Switched to keeping the strongest 6%.
+* **Length floor 0.18 -> 0.10.** Measured, real creases run 119-144 px on gloves whose
+  axis put that floor at 154-188 px, so genuine folds were rejected on length alone.
+
+**Result:** 7 of 7 images detect a fold, 100% recall.
+
+**Known limitation:** on two images the box lands on a finger crease rather than the
+large fold across the palm. The mechanism is understood -- a broad ridge is dark
+unevenly along its length, so it thresholds into a DASHED chain of blobs, each too short
+to survive the length filter, while a thinner but unbroken finger crease survives and
+wins. Two fixes were tried and both failed (see the rejected list).
+
+Two images were dropped from this set by agreement: they showed general crumpling rather
+than a distinct fold, and that ambiguity was pulling the scoring toward the wrong model.
+
+---
+
+## 9. Cross-talk between detectors
+
+Running everything over the whole dataset:
+
+| detector | recall on its own defect | precision |
+|---|---|---|
+| Incomplete Beading | 11/11 = 100% | 47.8% |
+| Damage By Fold | 7/7 = 100% | 30.4% |
+| Side Tear | 6/7 = 85.7% | 28.6% |
+
+**Recall is perfect; precision is not, and the reason is cross-talk rather than bad
+detection.** The fold detector fires on beading images because a torn cuff also creases
+the material; the beading detector fires on fold images because a fold near the cuff
+disturbs the hem profile. Each is finding something real, on an image labelled for a
+different defect.
+
+This is exactly the multi-defect recognition problem the bonus marks ask about. It is a
+per-region arbitration problem, not a per-detector tuning problem, and cannot be fixed
+by adjusting any single detector in isolation.
+
+Two rows in the evaluation are not mine: **Stain (24 false positives)** is Member B
+detector firing on cotton knit texture, and **Tear / Hole (5)** is Member A.
+
+---
+
+## 10. Next steps
+
+1. **Third defect** -- still to be chosen and built.
+2. **Ground truth for beading and fold.** Neither has been scored for LOCALISATION --
+   "100% recall" here means the right label on the right image, not that the box sits on
+   the defect. The side tear work showed how misleading that can be: image-level scoring
+   read 100%/100% while box-level was 22%/33%. The process that worked was: I mark the
+   expected results, the team verifies them, then we measure.
+3. **Clean gloves.** There are still none in the dataset, so the false-positive rate the
+   assignment asks for cannot be measured at all. 4-5 undamaged gloves per material.
+4. **Cross-talk arbitration** -- see section 9. Needed for the bonus marks, and it is a
+   group-level design decision rather than something any one detector can fix.
+5. **Reshoot** if time allows: glove off the hand, tears nudged open, plain saturated
+   backdrop in a contrasting hue, nothing white or grey in frame, even light, ~10%
+   margin, check focus. Most of the segmentation complexity above exists purely to
+   survive conditions a clean shot removes.
+
 
 ### Reusable tooling
 

@@ -444,6 +444,308 @@ def detect_side_tear(img, mask_filled, mask_raw, bg_color):
     return results
 
 
+
+# ============================================================
+# Incomplete beading: the cuff hem is interrupted
+# ============================================================
+# The bead is the finished hem at the cuff -- a maroon knitted band on the
+# cotton gloves, a rolled edge on latex and nitrile. "Incomplete beading"
+# means a stretch of that hem is missing, leaving a ragged opening that
+# looks like a tear at the wrist.
+#
+# The key property is that a bead is a CONTINUOUS structure, so the defect
+# is a DISCONTINUITY in it -- and the rest of the same bead is the
+# reference. That makes every threshold self-referential (median +/- k*sd
+# measured along this glove's own cuff) rather than absolute, so nothing
+# needs retuning per material or per lighting.
+#
+# Method: reduce the cuff boundary to a 1-D signature (Ch 10/11), walking
+# along it and recording at each station the colour just inside the edge
+# and the local roughness of the edge. On an intact bead both run flat. A
+# contiguous run where they jump is the defect.
+BEAD_CUFF_BAND = 0.72       # cuff = this far along the major axis and beyond
+BEAD_NEAR_SKIN = 70         # cuff opening = boundary within this many px of bare skin.
+                            # Generous on purpose: when the forearm is only partly in
+                            # frame the skin mask is a thin strip, and a tight radius
+                            # clips the cuff edge before it reaches the defect.
+BEAD_RUN_MERGE_FRAC = 0.06  # runs separated by less than this share of the edge are one defect
+BEAD_SAMPLE_DEPTH = 10      # how far inside the edge the bead colour is sampled
+BEAD_SMOOTH_WIN = 21        # window for the smoothed contour the roughness is measured against
+BEAD_MIN_EDGE_PTS = 30      # too short a cuff edge to judge
+BEAD_RUN_MIN_FRAC = 0.08    # a defect must span at least this share of the cuff edge
+BEAD_K_SIGMA = 0.8          # how far above the cuff's own median counts as "bead missing"
+BEAD_BOX_PAD = 8
+
+def _cuff_edge(mask_filled, skin, axis, lo, hi, low_is_distal):
+    """The stretch of glove boundary that forms the cuff opening."""
+    contours, _ = cv2.findContours(mask_filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if not contours:
+        return None
+    cnt = max(contours, key=cv2.contourArea)
+    pts = cnt.reshape(-1, 2).astype(np.float32)
+    frac = (pts @ axis - lo) / (hi - lo + 1e-6)
+    if not low_is_distal:
+        frac = 1.0 - frac
+
+    # Prefer boundary running alongside bare skin -- that is the opening the
+    # hand comes out of. If no skin was found (a heavy colour cast can
+    # defeat the skin rule) fall back to position along the major axis.
+    use_skin = skin is not None and skin.any()
+    near_skin = (cv2.dilate(skin, np.ones((BEAD_NEAR_SKIN,) * 2, np.uint8)) > 0
+                 if use_skin else None)
+    h, w = mask_filled.shape
+    keep = []
+    for i, (x, y) in enumerate(pts):
+        xi, yi = int(round(x)), int(round(y))
+        if not (0 <= xi < w and 0 <= yi < h):
+            continue
+        if frac[i] < BEAD_CUFF_BAND:
+            continue
+        if use_skin and not near_skin[yi, xi]:
+            continue
+        keep.append(i)
+    if len(keep) < BEAD_MIN_EDGE_PTS:
+        return None
+    keep = np.array(keep)
+    segments = np.split(keep, np.where(np.diff(keep) > 5)[0] + 1)
+    longest = max(segments, key=len)
+    return pts[longest] if len(longest) >= BEAD_MIN_EDGE_PTS else None
+
+
+def detect_incomplete_beading(img, mask_filled, mask_raw, bg_color):
+    """A stretch of the cuff hem is missing.
+
+    See the note above the BEAD_* constants for the reasoning. In short:
+    walk the cuff boundary, record the colour just inside it and how rough
+    it is, and flag any contiguous run where those depart from the rest of
+    the same cuff.
+    """
+    contours, _ = cv2.findContours(mask_filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return []
+    cnt = max(contours, key=cv2.contourArea)
+    axis, perp, lo, hi = _basic_rectangle_axis(cnt)
+    if hi - lo < 20:
+        return []
+    low_is_distal = _fingers_at_low_end(mask_filled, axis, perp, lo, hi, img=img)
+    edge = _cuff_edge(mask_filled, skin_mask(img), axis, lo, hi, low_is_distal)
+    if edge is None:
+        return []
+
+    moments = cv2.moments(cnt)
+    if moments["m00"] == 0:
+        return []
+    centroid = np.array([moments["m10"] / moments["m00"],
+                         moments["m01"] / moments["m00"]], np.float32)
+
+    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB).astype(np.float32)
+    h, w = mask_filled.shape
+
+    # roughness: how far the edge strays from a smoothed copy of itself
+    k = np.ones(BEAD_SMOOTH_WIN, np.float32) / BEAD_SMOOTH_WIN
+    smooth_x = np.convolve(edge[:, 0], k, "same")
+    smooth_y = np.convolve(edge[:, 1], k, "same")
+    roughness = np.hypot(edge[:, 0] - smooth_x, edge[:, 1] - smooth_y)
+
+    # colour of the material just inside the edge -- the bead itself
+    colours = []
+    for x, y in edge:
+        inward = centroid - np.array([x, y], np.float32)
+        inward /= (np.linalg.norm(inward) + 1e-6)
+        px, py = np.array([x, y], np.float32) + inward * BEAD_SAMPLE_DEPTH
+        xi = min(max(int(round(px)), 1), w - 2)
+        yi = min(max(int(round(py)), 1), h - 2)
+        colours.append(lab[yi - 1:yi + 2, xi - 1:xi + 2].reshape(-1, 3).mean(axis=0))
+    colours = np.array(colours)
+    colour_dev = np.linalg.norm(colours - np.median(colours, axis=0), axis=1)
+
+    def standardise(v):
+        return (v - np.median(v)) / (np.std(v) + 1e-6)
+
+    score = standardise(colour_dev) + standardise(roughness)
+    flag = score > BEAD_K_SIGMA
+
+    # smooth the flag so one defect reads as one run, not a dotted line
+    win = max(int(len(flag) * 0.02), 3)
+    flag = np.convolve(flag.astype(np.float32), np.ones(win) / win, "same") > 0.5
+
+    # collect the runs, then merge ones that nearly touch: a single gap in
+    # the bead often dips back under threshold briefly in the middle, and
+    # without merging it gets reported as three or four separate defects
+    runs = []
+    i = 0
+    while i < len(flag):
+        if not flag[i]:
+            i += 1
+            continue
+        j = i
+        while j < len(flag) and flag[j]:
+            j += 1
+        runs.append([i, j])
+        i = j
+
+    gap = max(int(BEAD_RUN_MERGE_FRAC * len(flag)), 4)
+    merged = []
+    for run in runs:
+        if merged and run[0] - merged[-1][1] <= gap:
+            merged[-1][1] = run[1]
+        else:
+            merged.append(run)
+
+    results = []
+    min_run = max(int(BEAD_RUN_MIN_FRAC * len(flag)), 6)
+    for a, b in merged:
+        if b - a < min_run:
+            continue
+        x, y, bw, bh = cv2.boundingRect(edge[a:b].astype(np.int32))
+        results.append(("Incomplete Beading",
+                        (max(x - BEAD_BOX_PAD, 0), max(y - BEAD_BOX_PAD, 0),
+                         bw + 2 * BEAD_BOX_PAD, bh + 2 * BEAD_BOX_PAD)))
+    return results
+
+
+
+# ============================================================
+# Damage by fold: a crease left where the glove was folded
+# ============================================================
+# A fold leaves a long dark crease across the glove SURFACE -- unlike the
+# other defects here it is not a boundary feature at all, so none of the
+# contour machinery applies.
+#
+# Morphological BLACKHAT with a LINE structuring element responds to dark
+# structures narrower than the element. A line roughly a tenth of the
+# glove's length therefore picks up a crease while ignoring the woven
+# texture of a fabric glove, which is fine-scale in EVERY direction and so
+# never fills a long line. Sweeping the element over 12 orientations and
+# keeping the maximum makes the response independent of which way the
+# fold runs. (Ch 8 morphology; Ch 7 line detection.)
+#
+# Two regions have to be excluded, both found by looking at the response:
+#   * the glove boundary -- finger gaps are dark valleys and light up hard
+#   * the cuff -- knitted ribbing is a regular line pattern that swamps a
+#     real crease
+FOLD_N_ORIENT = 12          # line elements every 180/12 degrees
+FOLD_LINE_FRAC = 0.10       # length of the line element / glove major axis
+FOLD_ERODE_FRAC = 0.045     # stay this far inside the glove boundary
+FOLD_CUFF_EXCLUDE = 0.72    # ignore the cuff band entirely
+# Rank threshold, not median+k*sigma: on a low-contrast crease the sigma of
+# the WHOLE glove buries the defect. Two images were missed for exactly
+# that reason even though the response traced their folds perfectly.
+FOLD_TOP_PERCENT = 6.0
+# A fold is LONG and STRAIGHT, so candidates are scored on length x
+# elongation: a shadow blob is neither, a strip of grip pattern is straight
+# but short. The length floor was 0.18 and had to come down -- measured,
+# real creases run 119-144 px on gloves whose axis put that floor at
+# 154-188 px, so genuine folds were rejected on length alone.
+FOLD_MIN_LEN_FRAC = 0.10
+FOLD_MIN_ELONG = 2.5
+FOLD_MERGE_GAP_FRAC = 0.06  # boxes closer than this are fragments of one crease
+FOLD_MAX_BOXES = 2
+
+
+def _line_element(length, angle_deg):
+    """A one-pixel-wide line of the given length and orientation."""
+    k = np.zeros((length, length), np.uint8)
+    c = length // 2
+    a = np.radians(angle_deg)
+    dx, dy = np.cos(a), np.sin(a)
+    for t in np.linspace(-c, c, length * 2):
+        x, y = int(round(c + t * dx)), int(round(c + t * dy))
+        if 0 <= x < length and 0 <= y < length:
+            k[y, x] = 1
+    return k
+
+
+def crease_response(gray, axis_len):
+    """Maximum blackhat response over orientations: how much each pixel
+    looks like part of a dark linear valley."""
+    length = max(int(FOLD_LINE_FRAC * axis_len) | 1, 9)
+    best = np.zeros(gray.shape, np.float32)
+    for i in range(FOLD_N_ORIENT):
+        element = _line_element(length, i * 180.0 / FOLD_N_ORIENT)
+        response = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, element)
+        best = np.maximum(best, response.astype(np.float32))
+    return best
+
+
+def detect_damage_by_fold(img, mask_filled, mask_raw, bg_color):
+    """A crease left across the glove where it was folded."""
+    contours, _ = cv2.findContours(mask_filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return []
+    cnt = max(contours, key=cv2.contourArea)
+    axis, perp, lo, hi = _basic_rectangle_axis(cnt)
+    axis_len = hi - lo
+    if axis_len < 40:
+        return []
+
+    er = max(int(FOLD_ERODE_FRAC * axis_len) | 1, 3)
+    inner = cv2.erode(mask_filled, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (er, er)))
+
+    low_is_distal = _fingers_at_low_end(mask_filled, axis, perp, lo, hi, img=img)
+    ys, xs = np.nonzero(inner)
+    if len(xs):
+        pts = np.stack([xs, ys], 1).astype(np.float32)
+        frac = (pts @ axis - lo) / (axis_len + 1e-6)
+        if not low_is_distal:
+            frac = 1.0 - frac
+        drop = frac > FOLD_CUFF_EXCLUDE
+        inner[ys[drop], xs[drop]] = 0
+    if inner.sum() < 500:
+        return []
+
+    gray = cv2.medianBlur(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), 5)
+    response = crease_response(gray, axis_len)
+    response[inner == 0] = 0
+
+    values = response[inner > 0]
+    threshold = np.percentile(values, 100.0 - FOLD_TOP_PERCENT)
+    binary = ((response > threshold) & (inner > 0)).astype(np.uint8) * 255
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE,
+                              cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)))
+    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    # NOTE: directional closing to rejoin a fold that thresholds into a
+    # DASHED chain of blobs was tried here and reverted. It did bridge the
+    # fragments, but it also merged the ridge into neighbouring creases:
+    # two images then produced a single box swallowing most of the glove,
+    # two lost their detection entirely, and the two it was aimed at still
+    # missed. Worse on every count than leaving the fragments alone.
+
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(binary, 8)
+    candidates = []
+    for i in range(1, n):
+        pts = np.argwhere(labels == i)[:, ::-1].astype(np.int32)
+        if len(pts) < 30:
+            continue
+        (_, _), (bw, bh), _ = cv2.minAreaRect(pts)
+        length = max(bw, bh)
+        elongation = length / (min(bw, bh) + 1e-6)
+        if length < FOLD_MIN_LEN_FRAC * axis_len or elongation < FOLD_MIN_ELONG:
+            continue
+        candidates.append((length * elongation,
+                           [int(stats[i, cv2.CC_STAT_LEFT]), int(stats[i, cv2.CC_STAT_TOP]),
+                            int(stats[i, cv2.CC_STAT_WIDTH]), int(stats[i, cv2.CC_STAT_HEIGHT])]))
+    candidates.sort(reverse=True, key=lambda c: c[0])
+
+    # one crease often survives as several components, so nearby boxes are
+    # merged before the top-N cut -- otherwise the budget is spent on
+    # fragments of a single fold rather than on separate defects
+    gap = FOLD_MERGE_GAP_FRAC * axis_len
+    merged = []
+    for _, (x, y, bw, bh) in candidates:
+        for m in merged:
+            if (x < m[0] + m[2] + gap and m[0] < x + bw + gap and
+                    y < m[1] + m[3] + gap and m[1] < y + bh + gap):
+                nx, ny = min(m[0], x), min(m[1], y)
+                m[2] = max(m[0] + m[2], x + bw) - nx
+                m[3] = max(m[1] + m[3], y + bh) - ny
+                m[0], m[1] = nx, ny
+                break
+        else:
+            merged.append([x, y, bw, bh])
+    return [("Damage By Fold", tuple(m)) for m in merged[:FOLD_MAX_BOXES]]
+
+
 # ============================================================
 # Defect 3: stain
 # ============================================================
@@ -475,6 +777,8 @@ def detect_stains(img, mask_filled, mask_raw, bg_color):
 # ============================================================
 DETECTORS = [
     detect_holes,
+    detect_incomplete_beading,
+    detect_damage_by_fold,
     detect_side_tear,     # before detect_open_tears on purpose: it is the more
                           # specific of the two (lateral band only), so within
                           # that band it should win the de-duplication
